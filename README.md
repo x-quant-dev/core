@@ -60,3 +60,14 @@ nc 0.0.0.0 7001          # then type: inject01a/submit LEHM01 Buy 100 AAPL 150
 | Configure HA failover | [User Manual](docs/user-manual.md) |
 | Troubleshoot a production issue | [Operations Runbook](docs/operations-runbook.md) |
 | Understand the architecture | [Overview](docs/overview.md) |
+
+## Publishing to Maven Local
+
+To publish the artifacts to your local Maven repository for use in other local projects:
+
+```bash
+./gradlew publishToMavenLocal
+```
+
+This will publish all modules (`clob`, `infrastructure`, `platform`, and `buildSrc`) to your local Maven repository (~/.m2/repository).
+You can then reference them in other Maven or Gradle projects using their group ID and version.
