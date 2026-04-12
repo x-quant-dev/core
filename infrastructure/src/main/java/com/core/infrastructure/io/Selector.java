@@ -85,6 +85,20 @@ public interface Selector extends Closeable {
     void select() throws IOException;
 
     /**
+     * Adds a poller that is invoked on every call to {@link #selectNow()}, {@link #select()}, and
+     * {@link #select(long)}, interleaved with NIO channel readiness callbacks.
+     *
+     * <p>Use this to integrate non-NIO I/O sources — such as Aeron subscriptions — into the same
+     * single-threaded event loop without a separate wrapper class.
+     * Any transport (pipes, plain UDP/TCP, MoldUDP64, Aeron) can be combined by registering its poll
+     * callback here.
+     *
+     * @param poller the poller to add; invoked once per select call
+     * @throws NullPointerException if poller is null
+     */
+    void addPoller(Runnable poller);
+
+    /**
      * Closes this selector.
      *
      * <p>Any channels created through this selector are deregistered, and any other resources associated with this

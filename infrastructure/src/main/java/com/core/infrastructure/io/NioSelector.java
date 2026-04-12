@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.net.StandardProtocolFamily;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.spi.SelectorProvider;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -19,6 +21,7 @@ public class NioSelector implements Selector {
     private final java.nio.channels.Selector selector;
     private final Consumer<SelectionKey> onSelect;
     private final SelectorProvider selectorProvider;
+    private final List<Runnable> pollers = new ArrayList<>();
 
     /**
      * Creates a {@code NioSelectService} with the system default selector provider.
@@ -66,23 +69,37 @@ public class NioSelector implements Selector {
     }
 
     @Override
+    public void addPoller(Runnable poller) {
+        pollers.add(Objects.requireNonNull(poller, "poller is null"));
+    }
+
+    @Override
     public void selectNow() throws IOException {
         selector.selectNow(onSelect);
+        runPollers();
     }
 
     @Override
     public void select() throws IOException {
         selector.select(onSelect);
+        runPollers();
     }
 
     @Override
     public void select(long timeout) throws IOException {
         selector.select(onSelect, timeout / NANOS_PER_MILLI);
+        runPollers();
     }
 
     @Override
     public void close() throws IOException {
         selector.close();
+    }
+
+    private void runPollers() {
+        for (var poller : pollers) {
+            poller.run();
+        }
     }
 
     private void onSelect(SelectionKey selectionKey) {

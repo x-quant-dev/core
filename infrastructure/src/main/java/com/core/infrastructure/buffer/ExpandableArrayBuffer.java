@@ -5,7 +5,7 @@ import org.agrona.DirectBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
-@SuppressWarnings({ "checkstyle:MissingJavadocType", "PMD.OverrideBothEqualsAndHashcode" })
+@SuppressWarnings("checkstyle:MissingJavadocType")
 public class ExpandableArrayBuffer extends org.agrona.ExpandableArrayBuffer {
 
     public ExpandableArrayBuffer() {
@@ -73,6 +73,15 @@ public class ExpandableArrayBuffer extends org.agrona.ExpandableArrayBuffer {
         } else {
             return false;
         }
+    }
+
+    @Override
+    public int hashCode() {
+        var hashCode = 1;
+        for (int i = 0, length = capacity(); i < length; i++) {
+            hashCode = 31 * hashCode + getByte(i);
+        }
+        return hashCode;
     }
 
     @Override

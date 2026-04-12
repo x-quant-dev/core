@@ -48,6 +48,7 @@ public class MoldBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
     private final Activator activator;
     private final Time time;
     private final int timestampOffset;
+    private final int leaderEpochOffset;
 
     private MutableDirectBuffer messageBuffer;
 
@@ -95,6 +96,7 @@ public class MoldBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
         Objects.requireNonNull(discoveryChannelAddress, "discoveryChannelAddress is null");
 
         timestampOffset = getSchema().getTimestampOffset();
+        leaderEpochOffset = getSchema().getLeaderEpochOffset();
 
         session = new MoldSession(
                 busName + ":MoldServerSession:" + eventChannelAddress, time, activatorFactory);
@@ -192,6 +194,7 @@ public class MoldBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
         Objects.requireNonNull(discoveryChannelAddress, "discoveryChannelAddress is null");
 
         timestampOffset = getSchema().getTimestampOffset();
+        leaderEpochOffset = getSchema().getLeaderEpochOffset();
 
         session = new MoldSession(
                 busName + ":MoldServerSession:" + eventChannelAddress, time, activatorFactory);
@@ -247,6 +250,7 @@ public class MoldBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
     public void commit(int msgLength) {
         if (activator.isActive()) {
             messageBuffer.putLong(timestampOffset, time.nanos());
+            messageBuffer.putInt(leaderEpochOffset, getLeaderEpoch());
         }
         eventPublisher.commit(msgLength);
     }
@@ -255,6 +259,7 @@ public class MoldBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
     public void commit(int msgLength, long timestamp) {
         if (activator.isActive()) {
             messageBuffer.putLong(timestampOffset, timestamp);
+            messageBuffer.putInt(leaderEpochOffset, getLeaderEpoch());
         }
         eventPublisher.commit(msgLength);
     }

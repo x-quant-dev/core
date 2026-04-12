@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="com.core.clob.schema.sbe"
+                   id="1"
+                   version="1"
+                   semanticVersion="1.0.0"
+                   description="CLOB SBE Schema"
+                   byteOrder="littleEndian">
+
+    <!-- Standard SBE message header (required by SBE tool for code generation).
+         The platform adapter layer (SbeSchema) maps between this and the platform's 18-byte header. -->
+    <types>
+        <composite name="messageHeader" description="SBE message header">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+
+        <enum name="Side" encodingType="int8" description="Order side">
+            <validValue name="Buy" description="Buy side">1</validValue>
+            <validValue name="Sell" description="Sell side">2</validValue>
+        </enum>
+
+        <enum name="ArchiveRole" encodingType="int8" description="Archive node role">
+            <validValue name="Primary" description="Primary archive">1</validValue>
+            <validValue name="Standby" description="Standby archive">2</validValue>
+        </enum>
+
+        <enum name="SnapshotValidity" encodingType="int8" description="Snapshot validity state">
+            <validValue name="Valid" description="All nodes completed">1</validValue>
+            <validValue name="Invalid" description="Snapshot data invalid">2</validValue>
+            <validValue name="TimedOut" description="Timeout waiting for nodes">3</validValue>
+        </enum>
+
+        <composite name="varStringEncoding" description="Variable-length ASCII string">
+            <type name="length" primitiveType="uint16"/>
+            <type name="varData" primitiveType="uint8" length="0" characterEncoding="ASCII"/>
+        </composite>
+    </types>
+
+    <sbe:message name="Heartbeat" id="1" description="Heartbeat message">
+    </sbe:message>
+
+    <sbe:message name="ApplicationDefinition" id="2" description="Application definition">
+        <data name="name" id="1" type="varStringEncoding" description="Application name"/>
+    </sbe:message>
+
+    <sbe:message name="EquityDefinition" id="3" description="Equity instrument definition">
+        <field name="instrumentId" id="1" type="int32" description="Instrument identifier"/>
+        <data name="ticker" id="2" type="varStringEncoding" description="Ticker symbol"/>
+    </sbe:message>
+
+    <sbe:message name="AddOrder" id="4" description="Add a new order">
+        <field name="orderId" id="1" type="int32" description="Order identifier"/>
+        <field name="side" id="2" type="Side" description="Order side"/>
+        <field name="qty" id="3" type="int64" description="Order quantity"/>
+        <field name="instrumentId" id="4" type="int32" description="Instrument identifier"/>
+        <field name="price" id="5" type="int64" description="Order price"/>
+    </sbe:message>
+
+    <sbe:message name="CancelOrder" id="5" description="Cancel an existing order">
+        <field name="orderId" id="1" type="int32" description="Order identifier"/>
+    </sbe:message>
+
+    <sbe:message name="FillOrder" id="6" description="Order fill">
+        <field name="orderId" id="1" type="int32" description="Order identifier"/>
+        <field name="qty" id="2" type="int64" description="Fill quantity"/>
+        <field name="price" id="3" type="int64" description="Fill price"/>
+    </sbe:message>
+
+    <sbe:message name="RejectOrder" id="7" description="Order rejection">
+        <field name="side" id="1" type="int8" description="Order side"/>
+        <field name="qty" id="2" type="int64" description="Order quantity"/>
+        <field name="instrumentId" id="3" type="int32" description="Instrument identifier"/>
+        <field name="price" id="4" type="int64" description="Order price"/>
+        <data name="reason" id="5" type="varStringEncoding" description="Rejection reason"/>
+    </sbe:message>
+
+    <sbe:message name="RejectCancel" id="8" description="Cancel rejection">
+        <field name="orderId" id="1" type="int32" description="Order identifier"/>
+        <data name="reason" id="2" type="varStringEncoding" description="Rejection reason"/>
+    </sbe:message>
+
+    <sbe:message name="ArchiveAnnouncement" id="9" description="Archive node announcement">
+        <field name="archiveId" id="1" type="int16" description="Archive node identifier"/>
+        <field name="recordingId" id="2" type="int64" description="Archive recording identifier"/>
+        <field name="role" id="3" type="ArchiveRole" description="Archive role"/>
+        <data name="controlChannel" id="4" type="varStringEncoding" description="Archive control channel"/>
+    </sbe:message>
+
+    <sbe:message name="SnapshotRequest" id="10" description="Snapshot request">
+        <field name="snapshotId" id="1" type="int64" description="Snapshot identifier"/>
+        <field name="requestTimestamp" id="2" type="int64" description="Request timestamp"/>
+        <field name="expectedNodeCount" id="3" type="int16" description="Expected node count"/>
+    </sbe:message>
+
+    <sbe:message name="SnapshotBegin" id="11" description="Snapshot begin">
+        <field name="snapshotId" id="1" type="int64" description="Snapshot identifier"/>
+        <field name="checkpointSeqNum" id="2" type="int64" description="Checkpoint sequence number"/>
+        <field name="requestTimestamp" id="3" type="int64" description="Request timestamp"/>
+        <field name="expectedNodeCount" id="4" type="int16" description="Expected node count"/>
+    </sbe:message>
+
+    <sbe:message name="SnapshotChunk" id="12" description="Snapshot data chunk">
+        <field name="snapshotId" id="1" type="int64" description="Snapshot identifier"/>
+        <field name="nodeId" id="2" type="int16" description="Node identifier"/>
+        <field name="chunkIndex" id="3" type="int16" description="Chunk index"/>
+        <field name="totalChunks" id="4" type="int16" description="Total chunks"/>
+        <data name="payload" id="5" type="varStringEncoding" description="Chunk payload"/>
+    </sbe:message>
+
+    <sbe:message name="SnapshotComplete" id="13" description="Snapshot completion">
+        <field name="snapshotId" id="1" type="int64" description="Snapshot identifier"/>
+        <field name="checkpointSeqNum" id="2" type="int64" description="Checkpoint sequence number"/>
+        <field name="nodeCount" id="3" type="int16" description="Node count"/>
+        <field name="validity" id="4" type="SnapshotValidity" description="Snapshot validity"/>
+        <field name="archiveRecordingId" id="5" type="int64" description="Archive recording ID"/>
+        <field name="archivePosition" id="6" type="int64" description="Archive position"/>
+    </sbe:message>
+
+</sbe:messageSchema>

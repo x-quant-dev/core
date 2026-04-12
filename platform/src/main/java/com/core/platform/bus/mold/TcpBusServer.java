@@ -47,6 +47,7 @@ public class TcpBusServer<DispatcherT extends Dispatcher, ProviderT extends Prov
 
     private final Time time;
     private final int timestampOffset;
+    private final int leaderEpochOffset;
 
     private MutableDirectBuffer messageBuffer;
 
@@ -88,6 +89,7 @@ public class TcpBusServer<DispatcherT extends Dispatcher, ProviderT extends Prov
         Objects.requireNonNull(messageReceiveAddress, "messageReceiveAddress is null");
 
         timestampOffset = getSchema().getTimestampOffset();
+        leaderEpochOffset = getSchema().getLeaderEpochOffset();
 
         session = new MoldSession(
                 "MoldServerSession:" + messageSendAddress, time, activatorFactory);
@@ -138,6 +140,7 @@ public class TcpBusServer<DispatcherT extends Dispatcher, ProviderT extends Prov
     public void commit(int msgLength) {
         if (activator.isActive()) {
             messageBuffer.putLong(timestampOffset, time.nanos());
+            messageBuffer.putInt(leaderEpochOffset, getLeaderEpoch());
         }
         messagePublisher.commit(msgLength);
     }
@@ -146,6 +149,7 @@ public class TcpBusServer<DispatcherT extends Dispatcher, ProviderT extends Prov
     public void commit(int msgLength, long timestamp) {
         if (activator.isActive()) {
             messageBuffer.putLong(timestampOffset, timestamp);
+            messageBuffer.putInt(leaderEpochOffset, getLeaderEpoch());
         }
         messagePublisher.commit(msgLength);
     }

@@ -161,6 +161,14 @@ public interface Encoder {
     Encoder setOptionalFieldsIndex(short value);
 
     /**
+     * Sets the leader epoch of the sequencer that published this event.
+     *
+     * @param value the leader epoch
+     * @return this
+     */
+    Encoder setLeaderEpoch(int value);
+
+    /**
      * Sets the schema version used to publish this message.
      *
      * @param value the schema version used to publish this message

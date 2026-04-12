@@ -1,4 +1,4 @@
-<core package="com.core.platform.schema" version="1" prefix="Test">
+<core package="com.core.platform.schema" version="2" prefix="Test">
     <properties>
         <property name="heartbeatMessageName" value="heartbeat"/>
         <property name="applicationIdField" value="applicationId"/>
@@ -11,6 +11,11 @@
             <value name="Buy" value="1" description="buy the instrument" />
             <value name="Sell" value="2" description="sell the instrument" />
         </enum>
+        <enum name="SnapshotValidity" description="the validity state of a completed snapshot">
+            <value name="Valid" value="1" description="all nodes completed successfully" />
+            <value name="Invalid" value="2" description="snapshot data is invalid" />
+            <value name="TimedOut" value="3" description="not all nodes responded within timeout" />
+        </enum>
     </enums>
 
     <header>
@@ -18,6 +23,7 @@
         <field name="ApplicationSequenceNumber" type="int"/>
         <field name="Timestamp" type="long" metadata="timestamp"/>
         <field name="OptionalFieldsIndex" type="short"/>
+        <field name="LeaderEpoch" type="int"/>
         <field name="SchemaVersion" type="byte"/>
         <field name="MessageType" type="byte"/>
     </header>
@@ -58,6 +64,36 @@
         <message id="-8" name="Venue" entity="venue">
             <field name="VenueId" type="int" primary-key="true"/>
             <optional id="1" name="Name" type="DirectBuffer" key="true"/>
+        </message>
+
+        <message id="-10" name="SnapshotRequest">
+            <field name="SnapshotId" type="long"/>
+            <field name="RequestTimestamp" type="long"/>
+            <field name="ExpectedNodeCount" type="short"/>
+        </message>
+
+        <message id="-11" name="SnapshotBegin">
+            <field name="SnapshotId" type="long"/>
+            <field name="CheckpointSeqNum" type="long"/>
+            <field name="RequestTimestamp" type="long"/>
+            <field name="ExpectedNodeCount" type="short"/>
+        </message>
+
+        <message id="-12" name="SnapshotChunk">
+            <field name="SnapshotId" type="long"/>
+            <field name="NodeId" type="short"/>
+            <field name="ChunkIndex" type="short"/>
+            <field name="TotalChunks" type="short"/>
+            <optional name="Payload" type="DirectBuffer"/>
+        </message>
+
+        <message id="-13" name="SnapshotComplete">
+            <field name="SnapshotId" type="long"/>
+            <field name="CheckpointSeqNum" type="long"/>
+            <field name="NodeCount" type="short"/>
+            <field name="Validity" type="SnapshotValidity"/>
+            <field name="ArchiveRecordingId" type="long"/>
+            <field name="ArchivePosition" type="long"/>
         </message>
     </messages>
 </core>

@@ -10,6 +10,9 @@
     <suppress checks="EmptyCatchBlock" files=".*"/>
     <suppress checks="AbbreviationAsWordInName" files="Test"/>
     <suppress checks="MethodName" files="Test"/>
+    <suppress checks="IllegalTokenText" files="Test"/>
+    <suppress checks="VariableDeclarationUsageDistance" files="Test"/>
     <suppress checks="LineLength" files="generated"/>
     <suppress checks="[a-zA-Z0-9]*" files="generated-main-avro-java"/>
+    <suppress checks="[a-zA-Z0-9]*" files="[\\/]build[\\/]generated[\\/]"/>
 </suppressions>

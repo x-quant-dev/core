@@ -21,6 +21,7 @@ public abstract class AbstractBusServer<DispatcherT extends Dispatcher, Provider
     private int[] appSeqNum;
     private final DispatcherT dispatcher;
     private short appId;
+    private int leaderEpoch;
     private final Schema<DispatcherT, ProviderT> schema;
 
     /**
@@ -51,8 +52,11 @@ public abstract class AbstractBusServer<DispatcherT extends Dispatcher, Provider
 
     @Override
     public void setApplicationSequenceNumber(int applicationId, int applicationSequenceNumber) {
+        if (applicationId <= 0) {
+            return;
+        }
         if (applicationId > appSeqNum.length) {
-            appSeqNum = Arrays.copyOf(appSeqNum, 2 * appSeqNum.length);
+            appSeqNum = Arrays.copyOf(appSeqNum, Math.max(applicationId, 2 * appSeqNum.length));
         }
         if (appId == 0) {
             appId = (short) applicationId;
@@ -64,9 +68,12 @@ public abstract class AbstractBusServer<DispatcherT extends Dispatcher, Provider
     public int incrementAndGetApplicationSequenceNumber(int applicationId) {
         if (applicationId <= 0 || applicationId > appSeqNum.length) {
             return -1;
-        } else {
-            return ++appSeqNum[applicationId - 1];
         }
+        int idx = applicationId - 1;
+        if (appSeqNum[idx] == 0) {
+            return -1;
+        }
+        return ++appSeqNum[idx];
     }
 
     @Override
@@ -76,5 +83,14 @@ public abstract class AbstractBusServer<DispatcherT extends Dispatcher, Provider
         } else {
             return appSeqNum[applicationId - 1];
         }
+    }
+
+    @Override
+    public void setLeaderEpoch(int epoch) {
+        this.leaderEpoch = epoch;
+    }
+
+    protected int getLeaderEpoch() {
+        return leaderEpoch;
     }
 }
