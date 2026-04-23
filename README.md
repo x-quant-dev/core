@@ -25,7 +25,9 @@ lease-based consensus (leader election) · binary message encoding ·
 shell-driven configuration
 
 **Dependencies:** [Agrona](https://github.com/real-logic/agrona) (buffer abstraction) ·
-[Eclipse Collections](https://www.eclipse.org/collections/) (GC-free collections)
+[Eclipse Collections](https://www.eclipse.org/collections/) (GC-free collections) ·
+[Aeron](https://github.com/real-logic/aeron) (messaging transport and archive) ·
+[SBE](https://github.com/real-logic/simple-binary-encoding) (binary message encoding)
 
 ## Quick Start
 
@@ -71,3 +73,12 @@ To publish the artifacts to your local Maven repository for use in other local p
 
 This will publish all modules (`clob`, `infrastructure`, `platform`, and `buildSrc`) to your local Maven repository (~/.m2/repository).
 You can then reference them in other Maven or Gradle projects using their group ID and version.
+
+## Attribution
+
+Originally authored by Jim Greco as the infrastructure and platform behind the F9 proprietary trading system (2024).
+The module layout (`buildSrc` / `infrastructure` / `platform` / `clob`), the command shell, and the Telnet-driven
+bootstrap model described in the Quick Start are derived from that original work. See git history prior to
+commit `12bb6be` for the original `QuickStart Guide` README and its full shell walkthrough; equivalent material
+now lives — rewritten and expanded — across the `docs/` tree (notably `command-files.md`, `getting-started.md`,
+and `user-manual.md`).
