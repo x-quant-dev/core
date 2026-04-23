@@ -1,5 +1,4 @@
 import com.core.schema.tasks.GenerateSchemaTask
-import com.core.schema.tasks.GenerateSbeTask
 
 plugins {
     id("core.java-conventions")
@@ -14,7 +13,7 @@ dependencies {
 }
 
 val generateSchema by tasks.registering(GenerateSchemaTask::class) {
-    schemaXml = "${projectDir}/src/main/resources/clob-schema.xml"
+    schemaXml = "${projectDir}/src/main/resources/kv-store-schema.xml"
     outputDir = layout.buildDirectory.dir("generated/schema").get().asFile.absolutePath
 }
 sourceSets.named("main") {
@@ -26,21 +25,8 @@ idea {
     }
 }
 
-val generateSbeSchema by tasks.registering(GenerateSbeTask::class) {
-    sbeXml = "${projectDir}/src/main/resources/clob-sbe-schema.xml"
-    outputDir = layout.buildDirectory.dir("generated/sbe").get().asFile.absolutePath
-}
-sourceSets.named("main") {
-    java.srcDir(layout.buildDirectory.dir("generated/sbe"))
-}
-idea {
-    module {
-        generatedSourceDirs.add(layout.buildDirectory.dir("generated/sbe").get().asFile)
-    }
-}
-
 tasks.compileJava {
-    dependsOn(generateSchema, generateSbeSchema)
+    dependsOn(generateSchema)
 }
 
 tasks.register<Jar>("uberjar") {

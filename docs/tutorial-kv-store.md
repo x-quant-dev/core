@@ -381,8 +381,8 @@ create /busServer com.core.platform.bus.mold.MoldBusServer \
 create seq01a com.core.platform.applications.sequencer.Sequencer @/busServer SEQ01
 create seq01a/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
 
-# ── KV Store Client ──────────────────────────────────────────
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+# ── KV Store Client (FIXME - REQUIRES UPDATE - FILE REMOVED) ─────
+# create kvStore com.core.clob.applications.KvStoreClient @/bus
 
 # ── Injector (for shell-driven sends) ────────────────────────
 create inject01a com.core.platform.applications.utilities.Injector @/bus INJ01
@@ -488,7 +488,7 @@ create seq01a com.core.platform.applications.sequencer.Sequencer @/busServer SEQ
 create seq01a/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
 
 # KV Client + Injector
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+create kvStore com.core.clob.applications.ClobClient @/bus
 create inject01a com.core.platform.applications.utilities.Injector @/bus INJ01
 inject01a/start
 
@@ -526,7 +526,7 @@ create seq01b com.core.platform.applications.sequencer.Sequencer @/busServer SEQ
 create seq01b/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
 
 # KV Client (receives same events, builds same state)
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+create kvStore com.core.clob.applications.ClobClient @/bus
 
 # HA
 source -s promotion-guard.cmd

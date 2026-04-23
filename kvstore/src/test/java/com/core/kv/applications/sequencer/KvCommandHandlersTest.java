@@ -1,4 +1,4 @@
-package com.core.clob.applications.sequencer;
+package com.core.kv.applications.sequencer;
 
 import com.core.kv.schema.DeleteEntryDecoder;
 import com.core.kv.schema.DeleteEntryEncoder;

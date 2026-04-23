@@ -17,10 +17,10 @@ create /busServer com.core.platform.bus.mold.MoldBusServer \
     server @/bus/schema @/busServer/store $event_channel $command_channel $discovery_channel
 
 create seq01a com.core.platform.applications.sequencer.Sequencer @/busServer SEQ01
-create seq01a/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
+create seq01a/kvHandlers com.core.kv.applications.sequencer.KvCommandHandlers @/busServer
 
 # KV Store Client
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+create kvStore com.core.kv.applications.KvStoreClient @/bus
 
 # Injector (for shell-driven sends)
 create inject01a com.core.platform.applications.utilities.Injector @/bus INJ01
