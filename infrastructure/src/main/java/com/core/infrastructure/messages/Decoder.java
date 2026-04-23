@@ -127,6 +127,13 @@ public interface Decoder {
     short getOptionalFieldsIndex();
 
     /**
+     * Returns the leader epoch of the sequencer that published this event.
+     *
+     * @return the leader epoch
+     */
+    int getLeaderEpoch();
+
+    /**
      * Returns the schema version used to publish this message.
      *
      * @return the schema version used to publish this message

@@ -96,6 +96,15 @@ public class ActivatorFactory {
         return activators.get(object);
     }
 
+    /**
+     * Returns all activators registered with this factory.
+     *
+     * @return a collection of all activators
+     */
+    public java.util.Collection<Activator> getActivators() {
+        return nameToActivator.values();
+    }
+
     void update(Activator activator) {
         if (updating) {
             // queue will be exhausted in the try/finally below

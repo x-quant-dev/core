@@ -45,7 +45,8 @@ public class ClobCommandHandlersTest {
         var time = new ManualTime(LocalTime.of(9, 30));
         var scheduler = new Scheduler(time);
         var logFactory = new TestLogFactory();
-        var activatorFactory = new ActivatorFactory(logFactory, new MetricFactory(logFactory));
+        var metricFactory = new MetricFactory(logFactory);
+        var activatorFactory = new ActivatorFactory(logFactory, metricFactory);
 
         busServer = new TestBusServer<>(time, new ClobSchema(), activatorFactory);
         eventPublisher = busServer.getEventPublisher();
@@ -54,6 +55,7 @@ public class ClobCommandHandlersTest {
                 scheduler,
                 activatorFactory,
                 logFactory,
+                metricFactory,
                 busServer,
                 "SEQ01");
         var activator = activatorFactory.getActivator(sequencer);

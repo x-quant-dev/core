@@ -105,6 +105,15 @@ public class Activator implements Comparable<Activator>, Encodable {
     }
 
     /**
+     * Returns the name of the activator.
+     *
+     * @return the name of the activator
+     */
+    public String getName() {
+        return name;
+    }
+
+    /**
      * Returns true if the activator is active.
      *
      * @return true if the activator is active

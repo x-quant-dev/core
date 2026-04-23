@@ -5,6 +5,7 @@ import com.core.clob.schema.AddOrderDecoder;
 import com.core.clob.schema.AddOrderEncoder;
 import com.core.clob.schema.ApplicationDefinitionDecoder;
 import com.core.clob.schema.ApplicationDefinitionEncoder;
+import com.core.clob.schema.ArchiveAnnouncementDecoder;
 import com.core.clob.schema.CancelOrderDecoder;
 import com.core.clob.schema.CancelOrderEncoder;
 import com.core.clob.schema.ClobDispatcher;
@@ -18,6 +19,10 @@ import com.core.clob.schema.RejectCancelEncoder;
 import com.core.clob.schema.RejectOrderDecoder;
 import com.core.clob.schema.RejectOrderEncoder;
 import com.core.clob.schema.Side;
+import com.core.clob.schema.SnapshotBeginEncoder;
+import com.core.clob.schema.SnapshotChunkDecoder;
+import com.core.clob.schema.SnapshotCompleteDecoder;
+import com.core.clob.schema.SnapshotRequestDecoder;
 import com.core.infrastructure.Allocation;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.collections.IntrusiveLinkedList;
@@ -81,6 +86,7 @@ public class ClobCommandHandlers implements Encodable {
     private final FillOrderEncoder fillOrderEncoder;
     private final RejectOrderEncoder rejectOrderEncoder;
     private final RejectCancelEncoder rejectCancelEncoder;
+    private final SnapshotBeginEncoder snapshotBeginEncoder;
 
     private final ObjectShortHashMap<DirectBuffer> appNameToId;
     private final ObjectIntHashMap<DirectBuffer> symbolToId;
@@ -113,6 +119,7 @@ public class ClobCommandHandlers implements Encodable {
         fillOrderEncoder = new FillOrderEncoder();
         rejectOrderEncoder = new RejectOrderEncoder();
         rejectCancelEncoder = new RejectCancelEncoder();
+        snapshotBeginEncoder = new SnapshotBeginEncoder();
 
         appNameToId = new ObjectShortHashMap<>();
         symbolToId = new ObjectIntHashMap<>();
@@ -131,6 +138,10 @@ public class ClobCommandHandlers implements Encodable {
         dispatcher.addCancelOrderListener(this::onCancelOrder);
         dispatcher.addRejectOrderListener(this::onRejectOrder);
         dispatcher.addRejectCancelListener(this::onRejectCancel);
+        dispatcher.addArchiveAnnouncementListener(this::onArchiveAnnouncement);
+        dispatcher.addSnapshotRequestListener(this::onSnapshotRequest);
+        dispatcher.addSnapshotChunkListener(this::onSnapshotChunk);
+        dispatcher.addSnapshotCompleteListener(this::onSnapshotComplete);
     }
 
     private void onHeartbeat(HeartbeatDecoder decoder) {
@@ -298,6 +309,29 @@ public class ClobCommandHandlers implements Encodable {
         if (decoder.getApplicationId() != busServer.getApplicationId()) {
             BusServer.copy(busServer, decoder);
         }
+    }
+
+    private void onArchiveAnnouncement(ArchiveAnnouncementDecoder decoder) {
+        BusServer.copy(busServer, decoder);
+    }
+
+    private void onSnapshotRequest(SnapshotRequestDecoder decoder) {
+        var seqNum = busServer.getApplicationSequenceNumber(busServer.getApplicationId());
+        BusServer.commit(busServer, snapshotBeginEncoder.wrap(busServer.acquire())
+                .setApplicationId(decoder.getApplicationId())
+                .setApplicationSequenceNumber(decoder.getApplicationSequenceNumber())
+                .setSnapshotId(decoder.getSnapshotId())
+                .setCheckpointSeqNum(seqNum)
+                .setRequestTimestamp(decoder.getRequestTimestamp())
+                .setExpectedNodeCount(decoder.getExpectedNodeCount()));
+    }
+
+    private void onSnapshotChunk(SnapshotChunkDecoder decoder) {
+        BusServer.copy(busServer, decoder);
+    }
+
+    private void onSnapshotComplete(SnapshotCompleteDecoder decoder) {
+        BusServer.copy(busServer, decoder);
     }
 
     IntrusiveLinkedList<Order> getBids(DirectBuffer symbol) {

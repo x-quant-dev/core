@@ -1,4 +1,4 @@
-<core package="com.core.clob.schema" version="1" prefix="Clob">
+<core package="com.core.clob.schema" version="2" prefix="Clob">
     <properties>
         <property name="heartbeatMessageName" value="heartbeat"/>
         <property name="applicationIdField" value="applicationId"/>
@@ -11,6 +11,15 @@
             <value name="Buy" value="1" description="buy the instrument" />
             <value name="Sell" value="2" description="sell the instrument" />
         </enum>
+        <enum name="ArchiveRole" description="the role of the archive node">
+            <value name="Primary" value="1" description="primary archive with LOCAL recording" />
+            <value name="Standby" value="2" description="standby archive with replicated recording" />
+        </enum>
+        <enum name="SnapshotValidity" description="the validity state of a completed snapshot">
+            <value name="Valid" value="1" description="all nodes completed successfully" />
+            <value name="Invalid" value="2" description="snapshot data is invalid" />
+            <value name="TimedOut" value="3" description="not all nodes responded within timeout" />
+        </enum>
     </enums>
 
     <header>
@@ -18,6 +27,7 @@
         <field name="ApplicationSequenceNumber" type="int"/>
         <field name="Timestamp" type="long" metadata="timestamp"/>
         <field name="OptionalFieldsIndex" type="short"/>
+        <field name="LeaderEpoch" type="int"/>
         <field name="SchemaVersion" type="byte"/>
         <field name="MessageType" type="byte"/>
     </header>
@@ -63,6 +73,43 @@
         <message id="8" name="RejectCancel">
             <field name="OrderId" type="int"/>
             <optional name="Reason" type="DirectBuffer"/>
+        </message>
+
+        <message id="9" name="ArchiveAnnouncement">
+            <field name="ArchiveId" type="short"/>
+            <field name="RecordingId" type="long"/>
+            <field name="Role" type="ArchiveRole"/>
+            <optional name="ControlChannel" type="DirectBuffer"/>
+        </message>
+
+        <message id="10" name="SnapshotRequest">
+            <field name="SnapshotId" type="long"/>
+            <field name="RequestTimestamp" type="long"/>
+            <field name="ExpectedNodeCount" type="short"/>
+        </message>
+
+        <message id="11" name="SnapshotBegin">
+            <field name="SnapshotId" type="long"/>
+            <field name="CheckpointSeqNum" type="long"/>
+            <field name="RequestTimestamp" type="long"/>
+            <field name="ExpectedNodeCount" type="short"/>
+        </message>
+
+        <message id="12" name="SnapshotChunk">
+            <field name="SnapshotId" type="long"/>
+            <field name="NodeId" type="short"/>
+            <field name="ChunkIndex" type="short"/>
+            <field name="TotalChunks" type="short"/>
+            <optional name="Payload" type="DirectBuffer"/>
+        </message>
+
+        <message id="13" name="SnapshotComplete">
+            <field name="SnapshotId" type="long"/>
+            <field name="CheckpointSeqNum" type="long"/>
+            <field name="NodeCount" type="short"/>
+            <field name="Validity" type="SnapshotValidity"/>
+            <field name="ArchiveRecordingId" type="long"/>
+            <field name="ArchivePosition" type="long"/>
         </message>
     </messages>
 </core>

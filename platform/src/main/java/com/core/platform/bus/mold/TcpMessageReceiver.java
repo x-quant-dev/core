@@ -21,6 +21,7 @@ import org.agrona.MutableDirectBuffer;
 
 import java.io.IOException;
 import java.net.StandardSocketOptions;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -54,7 +55,8 @@ class TcpMessageReceiver implements Activatable, Encodable {
     private long heartbeatTaskId;
 
     private SocketChannel socketChannel;
-    private Consumer<DirectBuffer> messageListener;
+    @SuppressWarnings("unchecked")
+    private Consumer<DirectBuffer>[] messageListeners = new Consumer[0];
 
     TcpMessageReceiver(
             Selector selector,
@@ -95,7 +97,7 @@ class TcpMessageReceiver implements Activatable, Encodable {
     @Override
     public void activate() {
         try {
-            if (messageListener == null) {
+            if (messageListeners.length == 0) {
                 throw new IllegalStateException("messageListener not set");
             }
 
@@ -195,7 +197,8 @@ class TcpMessageReceiver implements Activatable, Encodable {
      * @param messageListener the listener for messages that are published in sequence order
      */
     public void setMessageListener(Consumer<DirectBuffer> messageListener) {
-        this.messageListener = Objects.requireNonNull(messageListener);
+        messageListeners = Arrays.copyOf(messageListeners, messageListeners.length + 1);
+        messageListeners[messageListeners.length - 1] = Objects.requireNonNull(messageListener);
     }
 
     private void processMessages() {
@@ -246,7 +249,9 @@ class TcpMessageReceiver implements Activatable, Encodable {
 
                     nextSeqNum++;
                     wrapper.wrap(packetBuffer, offset + Short.BYTES, messageLength);
-                    messageListener.accept(wrapper);
+                    for (var listener : messageListeners) {
+                        listener.accept(wrapper);
+                    }
 
                     offset += Short.BYTES + messageLength;
                 }

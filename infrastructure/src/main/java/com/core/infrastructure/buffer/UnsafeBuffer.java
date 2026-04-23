@@ -1,7 +1,6 @@
 package com.core.infrastructure.buffer;
 
 import org.agrona.DirectBuffer;
-import org.agrona.UnsafeAccess;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -21,7 +20,6 @@ import java.nio.charset.StandardCharsets;
  * <p><b>Note:</b> The wrap methods on this class are not thread safe. Concurrent access should only happen after a
  * successful wrap.
  */
-@SuppressWarnings("PMD.OverrideBothEqualsAndHashcode")
 public class UnsafeBuffer extends org.agrona.concurrent.UnsafeBuffer {
 
     /**
@@ -136,14 +134,8 @@ public class UnsafeBuffer extends org.agrona.concurrent.UnsafeBuffer {
                 return false;
             }
 
-            final byte[] thisByteArray = this.byteArray();
-            final byte[] thatByteArray = that.byteArray();
-            final long thisOffset = this.addressOffset();
-            final long thatOffset = that.addressOffset();
-
-            for (int i = 0, length = capacity(); i < length; i++) {
-                if (UnsafeAccess.UNSAFE.getByte(thisByteArray, thisOffset + i)
-                        != UnsafeAccess.UNSAFE.getByte(thatByteArray, thatOffset + i)) {
+            for (var i = 0; i < capacity(); i++) {
+                if (getByte(i) != that.getByte(i)) {
                     return false;
                 }
             }
@@ -176,6 +168,15 @@ public class UnsafeBuffer extends org.agrona.concurrent.UnsafeBuffer {
         } else {
             return false;
         }
+    }
+
+    @Override
+    public int hashCode() {
+        var hashCode = 1;
+        for (int i = 0, length = capacity(); i < length; i++) {
+            hashCode = 31 * hashCode + getByte(i);
+        }
+        return hashCode;
     }
 
     @Override

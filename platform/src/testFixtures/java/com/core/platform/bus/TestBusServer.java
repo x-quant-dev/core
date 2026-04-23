@@ -19,7 +19,8 @@ public class TestBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
     private final TestMessagePublisher eventPublisher;
     private final Activator activator;
     private final Time time;
-    private Consumer<DirectBuffer> eventListener;
+    @SuppressWarnings("unchecked")
+    private Consumer<DirectBuffer>[] eventListeners = new Consumer[0];
     private Consumer<DirectBuffer> commandListener;
     private MutableDirectBuffer messageBuffer;
 
@@ -44,6 +45,7 @@ public class TestBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
     public void commit(int msgLength) {
         if (activator.isActive()) {
             messageBuffer.putLong(getSchema().getTimestampOffset(), time.nanos());
+            messageBuffer.putInt(getSchema().getLeaderEpochOffset(), getLeaderEpoch());
         }
         eventPublisher.commit(msgLength);
     }
@@ -52,6 +54,7 @@ public class TestBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
     public void commit(int msgLength, long timestamp) {
         if (activator.isActive()) {
             messageBuffer.putLong(getSchema().getTimestampOffset(), timestamp);
+            messageBuffer.putInt(getSchema().getLeaderEpochOffset(), getLeaderEpoch());
         }
         eventPublisher.commit(msgLength);
     }
@@ -68,7 +71,8 @@ public class TestBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
 
     @Override
     public void addEventListener(Consumer<DirectBuffer> eventListener) {
-        this.eventListener = eventListener;
+        this.eventListeners = java.util.Arrays.copyOf(eventListeners, eventListeners.length + 1);
+        eventListeners[eventListeners.length - 1] = eventListener;
     }
 
     @Override
@@ -82,7 +86,9 @@ public class TestBusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
 
     public void publishEvent(DirectBuffer event) {
         if (!activator.isActive()) {
-            eventListener.accept(event);
+            for (var listener : eventListeners) {
+                listener.accept(event);
+            }
         }
     }
 

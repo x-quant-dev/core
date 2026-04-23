@@ -262,6 +262,15 @@ public class Shell {
     }
 
     /**
+     * Returns an unmodifiable view of the shell's variables.
+     *
+     * @return the variables
+     */
+    public Map<DirectBuffer, DirectBuffer> getVariables() {
+        return variables;
+    }
+
+    /**
      * Sets the {@code property} to the specified {@code value}.
      *
      * @param property the property

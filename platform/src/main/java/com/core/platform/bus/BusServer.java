@@ -105,21 +105,28 @@ public interface BusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
 
     /**
      * Increments and returns the application sequence number for the specified application identifier.
-     * Returns 0 for an unknown application identifier.
+     * Returns -1 for an unknown or invalid application identifier.
      *
      * @param applicationId the application identifier
-     * @return the application sequence number
+     * @return the application sequence number, or -1 if the application identifier is unknown or invalid
      */
     int incrementAndGetApplicationSequenceNumber(int applicationId);
 
     /**
      * Returns the application sequence number for the specified application identifier.
-     * Returns 0 for an unknown application identifier.
+     * Returns -1 for an unknown or invalid application identifier.
      *
      * @param applicationId the application identifier
-     * @return the application sequence number
+     * @return the application sequence number, or -1 if the application identifier is unknown or invalid
      */
     int getApplicationSequenceNumber(int applicationId);
+
+    /**
+     * Sets the leader epoch to be stamped on outgoing events.
+     *
+     * @param epoch the leader epoch
+     */
+    void setLeaderEpoch(int epoch);
 
     /**
      * Copies the message wrapped by the decoder to the output.
@@ -156,6 +163,16 @@ public interface BusServer<DispatcherT extends Dispatcher, ProviderT extends Pro
      * @param eventListener the listener for events
      */
     void addEventListener(Consumer<DirectBuffer> eventListener);
+
+    /**
+     * Returns whether this bus server supports event listening.
+     * Some transports (e.g., Aeron) are server-only and cannot receive events.
+     *
+     * @return true if addEventListener will register working listeners
+     */
+    default boolean supportsEventListening() {
+        return true;
+    }
 
     /**
      * Sets the listener for messages received on the command channel.

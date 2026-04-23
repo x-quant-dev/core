@@ -14,6 +14,7 @@ import com.core.infrastructure.messages.Provider;
 import com.core.infrastructure.messages.Schema;
 import com.core.infrastructure.metrics.MetricFactory;
 import com.core.infrastructure.time.Scheduler;
+import com.core.infrastructure.time.SequencerDrivenTime;
 import com.core.infrastructure.time.Time;
 import com.core.platform.activation.Activator;
 import com.core.platform.activation.ActivatorFactory;
@@ -112,7 +113,15 @@ public class MoldBusClient<DispatcherT extends Dispatcher, ProviderT extends Pro
                 moldSession,
                 eventChannelAddress,
                 discoveryChannelAddress);
-        eventReceiver.addEventListener(buffer -> dispatcher.dispatch(buffer, 0, buffer.capacity()));
+        if (time instanceof SequencerDrivenTime sdt) {
+            var timestampOffset = schema.getTimestampOffset();
+            eventReceiver.addEventListener(buffer -> {
+                sdt.onEventTimestamp(buffer.getLong(timestampOffset));
+                dispatcher.dispatch(buffer, 0, buffer.capacity());
+            });
+        } else {
+            eventReceiver.addEventListener(buffer -> dispatcher.dispatch(buffer, 0, buffer.capacity()));
+        }
 
         activator = activatorFactory.createActivator(
                 "MoldBusClient:" + eventChannelAddress, this, eventReceiver);

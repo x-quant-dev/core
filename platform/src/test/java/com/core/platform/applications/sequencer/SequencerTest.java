@@ -28,6 +28,7 @@ import java.time.LocalTime;
 import java.util.Map;
 
 import static org.assertj.core.api.BDDAssertions.then;
+import static org.assertj.core.api.BDDAssertions.thenThrownBy;
 import static org.mockito.Mockito.mock;
 
 public class SequencerTest {
@@ -50,7 +51,8 @@ public class SequencerTest {
         var scheduler = new Scheduler(time);
         eventLoop = new EventLoop(time, scheduler, mock(Selector.class));
         var logFactory = new TestLogFactory();
-        var activatorFactory = new ActivatorFactory(logFactory, new MetricFactory(logFactory));
+        var metricFactory = new MetricFactory(logFactory);
+        var activatorFactory = new ActivatorFactory(logFactory, metricFactory);
         schema = new TestSchema();
         busServer = new TestBusServer<>(time, schema, activatorFactory);
         eventPublisher = busServer.getEventPublisher();
@@ -59,6 +61,7 @@ public class SequencerTest {
                 scheduler,
                 activatorFactory,
                 logFactory,
+                metricFactory,
                 busServer,
                 applicationName);
         activator = activatorFactory.getActivator(sequencer);
@@ -261,6 +264,256 @@ public class SequencerTest {
         then(decoder.getApplicationSequenceNumber()).isEqualTo(7);
         decoder = eventPublisher.remove();
         then(decoder.getApplicationSequenceNumber()).isEqualTo(8);
+    }
+
+    @Test
+    void command_with_unknown_appId_is_dropped() {
+        activator.start();
+        eventPublisher.remove();
+        eventPublisher.remove();
+
+        // appId 99 has never been registered via AppDefinition
+        publishCommand(99, 2, -1, "test");
+
+        // command should be dropped, no event published
+        then(eventPublisher.size()).isEqualTo(0);
+    }
+
+    @Test
+    void passive_events_do_not_regress_sequence_numbers() {
+        // receive events with appId=5
+        publishAppDefinitionEvent(5, "APP01");
+        publishEvent(5, 5, -1, "1");
+
+        // simulate replay/rewind: older event arrives
+        publishEvent(5, 3, -1, "old");
+
+        // sequence number should stay at 5 (not regress to 3)
+        then(busServer.getApplicationSequenceNumber(5)).isEqualTo(5);
+    }
+
+    @Test
+    void command_with_unregistered_in_range_appId_is_dropped() {
+        activator.start();
+        eventPublisher.remove();
+        eventPublisher.remove();
+
+        // appId 50 is in range (≤100 array size) but was never registered via ApplicationDefinition
+        publishCommand(50, 1, -1, "test");
+
+        // command should be dropped, no event published
+        then(eventPublisher.size()).isEqualTo(0);
+    }
+
+    @Test
+    void passive_event_with_appId_zero_is_ignored() {
+        // sequencer is passive (not activated)
+        publishEvent(0, 1, -1, "test");
+
+        // should not crash and state unchanged
+        then(busServer.getApplicationSequenceNumber(0)).isEqualTo(-1);
+    }
+
+    @Test
+    void passive_event_with_negative_appId_is_ignored() {
+        // sequencer is passive (not activated)
+        publishEvent(-1, 1, -1, "test");
+
+        // should not crash
+        then(busServer.getApplicationSequenceNumber(-1)).isEqualTo(-1);
+    }
+
+    @Test
+    void dispatch_exception_propagates_to_event_loop() {
+        busServer.getDispatcher().addApplicationDefinitionListener(x -> {
+            if (x.nameAsString().equals("CRASHME")) {
+                throw new RuntimeException("simulated dispatch error");
+            }
+        });
+        activator.start();
+        eventPublisher.remove();
+        eventPublisher.remove();
+
+        thenThrownBy(() -> busServer.publishCommand(new ApplicationDefinitionEncoder()
+                .setApplicationId((short) 0)
+                .setApplicationSequenceNumber(1)
+                .setName("CRASHME")))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("simulated dispatch error");
+    }
+
+    @Test
+    void app_definition_with_nonzero_appId_is_dropped() {
+        activator.start();
+        eventPublisher.remove();
+        eventPublisher.remove();
+
+        // app definition with appId=5 instead of 0 should be rejected
+        busServer.publishCommand(new ApplicationDefinitionEncoder()
+                .setApplicationId((short) 5)
+                .setApplicationSequenceNumber(1)
+                .setName("ROGUE"));
+
+        then(eventPublisher.size()).isEqualTo(0);
+    }
+
+    @Test
+    void setApplicationSequenceNumber_with_zero_appId_is_ignored() {
+        busServer.setApplicationSequenceNumber(0, 10);
+        then(busServer.getApplicationSequenceNumber(0)).isEqualTo(-1);
+    }
+
+    @Test
+    void setApplicationSequenceNumber_with_negative_appId_is_ignored() {
+        busServer.setApplicationSequenceNumber(-1, 10);
+        then(busServer.getApplicationSequenceNumber(-1)).isEqualTo(-1);
+    }
+
+    @Test
+    void setApplicationSequenceNumber_with_large_appId_resizes_correctly() {
+        busServer.setApplicationSequenceNumber(500, 9);
+
+        then(busServer.getApplicationSequenceNumber(500)).isEqualTo(9);
+    }
+
+    @Test
+    void setApplicationSequenceNumber_with_appId_beyond_double_capacity() {
+        busServer.setApplicationSequenceNumber(250, 7);
+
+        then(busServer.getApplicationSequenceNumber(250)).isEqualTo(7);
+    }
+
+    // ── Phase 4: leader-epoch stamping ──────────────────────────────────
+
+    @Test
+    void published_events_contain_leader_epoch() {
+        activator.start();
+        eventPublisher.remove();
+        var heartbeat = eventPublisher.remove();
+        then(heartbeat.getLeaderEpoch()).isEqualTo(1);
+
+        publishAppDefinitionCommand("APP01");
+        publishCommand(2, 2, -1, "test");
+
+        var event = eventPublisher.remove();
+        then(event.getLeaderEpoch()).isEqualTo(1);
+    }
+
+    @Test
+    void epoch_survives_beyond_32k_without_truncation() {
+        var buffer = BufferUtils.allocate(schema.getMessageHeaderLength());
+        int epoch = 50000;
+        buffer.putInt(schema.getLeaderEpochOffset(), epoch);
+        then(buffer.getInt(schema.getLeaderEpochOffset())).isEqualTo(50000);
+    }
+
+    @Test
+    void heartbeat_contains_full_epoch() {
+        activator.start();
+        eventPublisher.remove(); // appDef
+        HeartbeatDecoder heartbeat = eventPublisher.remove();
+        then(heartbeat.getLeaderEpoch()).isEqualTo(1);
+
+        activator.stop();
+        activator.start();
+        HeartbeatDecoder heartbeat2 = eventPublisher.remove();
+        then(heartbeat2.getLeaderEpoch()).isEqualTo(2);
+    }
+
+    @Test
+    void passive_event_with_stale_epoch_is_dropped() {
+        var buffer = buildMessage(2, 1, (byte) -1, "test");
+        buffer.putInt(schema.getLeaderEpochOffset(), 2);
+        busServer.publishEvent(buffer);
+
+        var stale = buildMessage(2, 2, (byte) -1, "stale");
+        stale.putInt(schema.getLeaderEpochOffset(), 1);
+        busServer.publishEvent(stale);
+
+        then(busServer.getApplicationSequenceNumber(2)).isEqualTo(1);
+    }
+
+    @Test
+    void passive_event_with_higher_epoch_is_accepted() {
+        var buffer = buildMessage(2, 1, (byte) -1, "test");
+        buffer.putInt(schema.getLeaderEpochOffset(), 1);
+        busServer.publishEvent(buffer);
+
+        var newer = buildMessage(2, 2, (byte) -1, "newer");
+        newer.putInt(schema.getLeaderEpochOffset(), 2);
+        busServer.publishEvent(newer);
+
+        then(busServer.getApplicationSequenceNumber(2)).isEqualTo(2);
+    }
+
+    @Test
+    void stale_epoch_drop_resets_on_new_epoch_sequence() {
+        var buffer = buildMessage(2, 1, (byte) -1, "test");
+        buffer.putInt(schema.getLeaderEpochOffset(), 2);
+        busServer.publishEvent(buffer);
+
+        var stale = buildMessage(2, 2, (byte) -1, "stale");
+        stale.putInt(schema.getLeaderEpochOffset(), 1);
+        busServer.publishEvent(stale);
+
+        var newer = buildMessage(2, 2, (byte) -1, "newer");
+        newer.putInt(schema.getLeaderEpochOffset(), 3);
+        busServer.publishEvent(newer);
+
+        then(busServer.getApplicationSequenceNumber(2)).isEqualTo(2);
+    }
+
+    // ── Latency tracking tests ────────────────────────────────────────────
+
+    @Test
+    void status_contains_latency_fields() {
+        activator.start();
+        eventPublisher.remove();
+        eventPublisher.remove();
+        publishAppDefinitionCommand("APP01");
+
+        publishCommand(2, 2, -1, "test");
+
+        var status = sequencer.toString();
+        then(status).contains("lastCommandLatencyNanos");
+        then(status).contains("maxCommandLatencyNanos");
+    }
+
+    @Test
+    void latency_is_zero_when_no_commands() {
+        var status = sequencer.toString();
+        then(status).contains("lastCommandLatencyNanos");
+    }
+
+    @Test
+    void reset_latency_clears_max() {
+        activator.start();
+        eventPublisher.remove();
+        eventPublisher.remove();
+        publishAppDefinitionCommand("APP01");
+
+        publishCommand(2, 2, -1, "test");
+        sequencer.resetLatency();
+
+        var status = sequencer.toString();
+        then(status).contains("lastCommandLatencyNanos");
+        then(status).contains("maxCommandLatencyNanos");
+    }
+
+    @Test
+    void passive_dispatch_exception_propagates_to_event_loop() {
+        busServer.getDispatcher().addApplicationDefinitionListener(x -> {
+            if (x.nameAsString().equals("CRASHME")) {
+                throw new RuntimeException("simulated passive dispatch error");
+            }
+        });
+
+        thenThrownBy(() -> busServer.publishEvent(new ApplicationDefinitionEncoder()
+                .setApplicationId((short) 5)
+                .setApplicationSequenceNumber(1)
+                .setName("CRASHME")))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("simulated passive dispatch error");
     }
 
     public void publishCommand(int appId, int appSeqNum, int msgType, String message) {

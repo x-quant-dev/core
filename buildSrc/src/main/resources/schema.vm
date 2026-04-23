@@ -78,6 +78,11 @@ public class ${schema.prefix}Schema implements com.core.infrastructure.messages.
     }
 
     @Override
+    public int getLeaderEpochOffset() {
+        return ${schema.headerOffset("leaderEpoch")};
+    }
+
+    @Override
     public int getSchemaVersionOffset() {
         return ${schema.headerOffset("schemaVersion")};
     }

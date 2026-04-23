@@ -45,10 +45,20 @@ public interface Schema<DispatcherT extends Dispatcher, ProviderT extends Provid
 
     /**
      * Returns the byte offset of the optional fields.
+     * This 2-byte field can be used by applications as a correlation token
+     * to trace commands through to their resulting events.
      *
      * @return the byte offset of the optional fields
      */
     int getOptionalFieldsOffset();
+
+    /**
+     * Returns the byte offset of the leader epoch field.
+     * This 4-byte field records the leader epoch of the sequencer that published the event.
+     *
+     * @return the byte offset of the leader epoch field
+     */
+    int getLeaderEpochOffset();
 
     /**
      * Returns the byte offset of the message version.
