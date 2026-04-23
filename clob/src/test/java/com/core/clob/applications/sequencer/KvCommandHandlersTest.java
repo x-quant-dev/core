@@ -1,13 +1,13 @@
 package com.core.clob.applications.sequencer;
 
-import com.core.clob.schema.ClobDispatcher;
-import com.core.clob.schema.ClobProvider;
-import com.core.clob.schema.ClobSchema;
-import com.core.clob.schema.DeleteEntryDecoder;
-import com.core.clob.schema.DeleteEntryEncoder;
-import com.core.clob.schema.PutEntryDecoder;
-import com.core.clob.schema.PutEntryEncoder;
-import com.core.clob.schema.RejectEntryDecoder;
+import com.core.kv.schema.DeleteEntryDecoder;
+import com.core.kv.schema.DeleteEntryEncoder;
+import com.core.kv.schema.KvDispatcher;
+import com.core.kv.schema.KvProvider;
+import com.core.kv.schema.KvSchema;
+import com.core.kv.schema.PutEntryDecoder;
+import com.core.kv.schema.PutEntryEncoder;
+import com.core.kv.schema.RejectEntryDecoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.log.TestLogFactory;
 import com.core.infrastructure.metrics.MetricFactory;
@@ -35,7 +35,7 @@ public class KvCommandHandlersTest {
 
     private static final short APP_ID = 2;
 
-    private TestBusServer<ClobDispatcher, ClobProvider> busServer;
+    private TestBusServer<KvDispatcher, KvProvider> busServer;
     private TestMessagePublisher eventPublisher;
     private KvCommandHandlers handler;
     private int appSeqNum;
@@ -47,7 +47,7 @@ public class KvCommandHandlersTest {
         var metricFactory = new MetricFactory(logFactory);
         var activatorFactory = new ActivatorFactory(logFactory, metricFactory);
 
-        busServer = new TestBusServer<>(time, new ClobSchema(), activatorFactory);
+        busServer = new TestBusServer<>(time, new KvSchema(), activatorFactory);
         eventPublisher = busServer.getEventPublisher();
         handler = new KvCommandHandlers(busServer);
         appSeqNum = 0;

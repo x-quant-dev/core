@@ -111,20 +111,5 @@
             <field name="ArchiveRecordingId" type="long"/>
             <field name="ArchivePosition" type="long"/>
         </message>
-
-        <!-- Key/Value store messages -->
-        <message id="20" name="PutEntry">
-            <optional id="1" name="Key" type="DirectBuffer"/>
-            <optional id="2" name="Value" type="DirectBuffer"/>
-        </message>
-
-        <message id="21" name="DeleteEntry">
-            <optional id="1" name="Key" type="DirectBuffer"/>
-        </message>
-
-        <message id="22" name="RejectEntry">
-            <optional id="1" name="Key" type="DirectBuffer"/>
-            <optional id="2" name="Reason" type="DirectBuffer"/>
-        </message>
     </messages>
 </core>

@@ -1,10 +1,10 @@
 package com.core.clob.applications.sequencer;
 
-import com.core.clob.schema.ClobDispatcher;
-import com.core.clob.schema.ClobProvider;
-import com.core.clob.schema.DeleteEntryDecoder;
-import com.core.clob.schema.PutEntryDecoder;
-import com.core.clob.schema.RejectEntryEncoder;
+import com.core.kv.schema.DeleteEntryDecoder;
+import com.core.kv.schema.KvDispatcher;
+import com.core.kv.schema.KvProvider;
+import com.core.kv.schema.PutEntryDecoder;
+import com.core.kv.schema.RejectEntryEncoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.command.Command;
 import com.core.infrastructure.encoding.Encodable;
@@ -24,7 +24,7 @@ import java.util.Objects;
  */
 public class KvCommandHandlers implements Encodable {
 
-    private final BusServer<ClobDispatcher, ClobProvider> busServer;
+    private final BusServer<KvDispatcher, KvProvider> busServer;
     private final RejectEntryEncoder rejectEntryEncoder;
     private final UnifiedSet<DirectBuffer> keys;
 
@@ -34,7 +34,7 @@ public class KvCommandHandlers implements Encodable {
      *
      * @param busServer the sequencer bus
      */
-    public KvCommandHandlers(BusServer<ClobDispatcher, ClobProvider> busServer) {
+    public KvCommandHandlers(BusServer<KvDispatcher, KvProvider> busServer) {
         this.busServer = Objects.requireNonNull(busServer, "busServer is null");
 
         rejectEntryEncoder = new RejectEntryEncoder();

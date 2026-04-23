@@ -26,6 +26,19 @@ idea {
     }
 }
 
+val generateKvSchema by tasks.registering(GenerateSchemaTask::class) {
+    schemaXml = "${projectDir}/src/main/resources/kv-store-schema.xml"
+    outputDir = layout.buildDirectory.dir("generated/kv-schema").get().asFile.absolutePath
+}
+sourceSets.named("main") {
+    java.srcDir(layout.buildDirectory.dir("generated/kv-schema"))
+}
+idea {
+    module {
+        generatedSourceDirs.add(layout.buildDirectory.dir("generated/kv-schema").get().asFile)
+    }
+}
+
 val generateSbeSchema by tasks.registering(GenerateSbeTask::class) {
     sbeXml = "${projectDir}/src/main/resources/clob-sbe-schema.xml"
     outputDir = layout.buildDirectory.dir("generated/sbe").get().asFile.absolutePath
@@ -40,7 +53,7 @@ idea {
 }
 
 tasks.compileJava {
-    dependsOn(generateSchema, generateSbeSchema)
+    dependsOn(generateSchema, generateKvSchema, generateSbeSchema)
 }
 
 tasks.register<Jar>("uberjar") {

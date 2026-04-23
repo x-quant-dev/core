@@ -7,7 +7,7 @@ source network-local.cmd
 source -s sysout-log.cmd
 source -s telnet.cmd inet:0.0.0.0:7002
 
-create /bus/schema com.core.clob.schema.ClobSchema
+create /bus/schema com.core.kv.schema.KvSchema
 create /bus com.core.platform.bus.mold.MoldBusClient \
     client @/bus/schema $event_channel $command_channel $discovery_channel
 

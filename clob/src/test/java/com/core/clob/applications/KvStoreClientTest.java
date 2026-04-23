@@ -1,11 +1,11 @@
 package com.core.clob.applications;
 
-import com.core.clob.schema.ClobDispatcher;
-import com.core.clob.schema.ClobProvider;
-import com.core.clob.schema.ClobSchema;
-import com.core.clob.schema.DeleteEntryEncoder;
-import com.core.clob.schema.PutEntryEncoder;
-import com.core.clob.schema.RejectEntryEncoder;
+import com.core.kv.schema.DeleteEntryEncoder;
+import com.core.kv.schema.KvDispatcher;
+import com.core.kv.schema.KvProvider;
+import com.core.kv.schema.KvSchema;
+import com.core.kv.schema.PutEntryEncoder;
+import com.core.kv.schema.RejectEntryEncoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.log.TestLogFactory;
 import com.core.infrastructure.metrics.MetricFactory;
@@ -25,7 +25,7 @@ import static org.assertj.core.api.BDDAssertions.then;
  */
 public class KvStoreClientTest {
 
-    private TestBusClient<ClobDispatcher, ClobProvider> busClient;
+    private TestBusClient<KvDispatcher, KvProvider> busClient;
     private KvStoreClient client;
 
     @BeforeEach
@@ -34,7 +34,7 @@ public class KvStoreClientTest {
         var metricFactory = new MetricFactory(logFactory);
         var activatorFactory = new ActivatorFactory(logFactory, metricFactory);
 
-        busClient = new TestBusClient<>(new ClobSchema(), activatorFactory);
+        busClient = new TestBusClient<>(new KvSchema(), activatorFactory);
         client = new KvStoreClient(busClient);
     }
 
@@ -101,7 +101,7 @@ public class KvStoreClientTest {
 
         // rebuild a fresh client and replay the same sequence
         var activatorFactory = new ActivatorFactory(new TestLogFactory(), new MetricFactory(new TestLogFactory()));
-        var replayClient = new TestBusClient<ClobDispatcher, ClobProvider>(new ClobSchema(), activatorFactory);
+        var replayClient = new TestBusClient<KvDispatcher, KvProvider>(new KvSchema(), activatorFactory);
         var replay = new KvStoreClient(replayClient);
         dispatchPut(replayClient, "a", "1");
         dispatchPut(replayClient, "b", "2");
@@ -131,7 +131,7 @@ public class KvStoreClientTest {
     }
 
     private static void dispatchPut(
-            TestBusClient<ClobDispatcher, ClobProvider> bus, String key, String value) {
+            TestBusClient<KvDispatcher, KvProvider> bus, String key, String value) {
         bus.dispatch(new PutEntryEncoder()
                 .setApplicationId((short) 2)
                 .setApplicationSequenceNumber(1)
@@ -140,7 +140,7 @@ public class KvStoreClientTest {
     }
 
     private static void dispatchDelete(
-            TestBusClient<ClobDispatcher, ClobProvider> bus, String key) {
+            TestBusClient<KvDispatcher, KvProvider> bus, String key) {
         bus.dispatch(new DeleteEntryEncoder()
                 .setApplicationId((short) 2)
                 .setApplicationSequenceNumber(1)

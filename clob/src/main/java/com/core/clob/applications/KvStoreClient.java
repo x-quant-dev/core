@@ -1,8 +1,8 @@
 package com.core.clob.applications;
 
-import com.core.clob.schema.DeleteEntryDecoder;
-import com.core.clob.schema.PutEntryDecoder;
-import com.core.clob.schema.RejectEntryDecoder;
+import com.core.kv.schema.DeleteEntryDecoder;
+import com.core.kv.schema.PutEntryDecoder;
+import com.core.kv.schema.RejectEntryDecoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.command.Command;
 import com.core.infrastructure.encoding.Encodable;

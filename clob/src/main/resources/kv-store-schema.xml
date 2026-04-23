@@ -1,0 +1,40 @@
+<core package="com.core.kv.schema" version="1" prefix="Kv">
+    <properties>
+        <property name="heartbeatMessageName" value="heartbeat"/>
+        <property name="applicationIdField" value="applicationId"/>
+        <property name="applicationDefinitionMessageName" value="applicationDefinition"/>
+        <property name="applicationDefinitionNameField" value="name"/>
+    </properties>
+
+    <header>
+        <field name="ApplicationId" type="short" primary-key="true"/>
+        <field name="ApplicationSequenceNumber" type="int"/>
+        <field name="Timestamp" type="long" metadata="timestamp"/>
+        <field name="OptionalFieldsIndex" type="short"/>
+        <field name="LeaderEpoch" type="int"/>
+        <field name="SchemaVersion" type="byte"/>
+        <field name="MessageType" type="byte"/>
+    </header>
+
+    <messages>
+        <message id="1" name="Heartbeat"/>
+
+        <message id="2" name="ApplicationDefinition" entity="application">
+            <optional id="1" name="Name" type="DirectBuffer" key="true" description="the name of the application"/>
+        </message>
+
+        <message id="3" name="PutEntry">
+            <optional id="1" name="Key" type="DirectBuffer"/>
+            <optional id="2" name="Value" type="DirectBuffer"/>
+        </message>
+
+        <message id="4" name="DeleteEntry">
+            <optional id="1" name="Key" type="DirectBuffer"/>
+        </message>
+
+        <message id="5" name="RejectEntry">
+            <optional id="1" name="Key" type="DirectBuffer"/>
+            <optional id="2" name="Reason" type="DirectBuffer"/>
+        </message>
+    </messages>
+</core>
