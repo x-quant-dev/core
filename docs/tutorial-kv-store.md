@@ -27,19 +27,23 @@ Use message IDs starting at 20 to avoid conflicts with the existing CLOB message
 ```xml
 <!-- Key/Value store messages -->
 <message id="20" name="PutEntry">
-    <optional name="Key" type="DirectBuffer"/>
-    <optional name="Value" type="DirectBuffer"/>
+    <optional id="1" name="Key" type="DirectBuffer"/>
+    <optional id="2" name="Value" type="DirectBuffer"/>
 </message>
 
 <message id="21" name="DeleteEntry">
-    <optional name="Key" type="DirectBuffer"/>
+    <optional id="1" name="Key" type="DirectBuffer"/>
 </message>
 
 <message id="22" name="RejectEntry">
-    <optional name="Key" type="DirectBuffer"/>
-    <optional name="Reason" type="DirectBuffer"/>
+    <optional id="1" name="Key" type="DirectBuffer"/>
+    <optional id="2" name="Reason" type="DirectBuffer"/>
 </message>
 ```
+
+> **Note:** when a message has more than one `optional` element, each one needs a unique `id`
+> attribute. The code generator keys optional-field dispatch off this id; omitting it produces a
+> duplicate `case 0:` in the generated decoder and breaks compilation.
 
 After running the build (`./gradlew build`), the code generator produces:
 
@@ -72,9 +76,7 @@ package com.core.clob.applications.sequencer;
 import com.core.clob.schema.ClobDispatcher;
 import com.core.clob.schema.ClobProvider;
 import com.core.clob.schema.DeleteEntryDecoder;
-import com.core.clob.schema.DeleteEntryEncoder;
 import com.core.clob.schema.PutEntryDecoder;
-import com.core.clob.schema.PutEntryEncoder;
 import com.core.clob.schema.RejectEntryEncoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.command.Command;
@@ -96,8 +98,6 @@ import java.util.Objects;
 public class KvCommandHandlers implements Encodable {
 
     private final BusServer<ClobDispatcher, ClobProvider> busServer;
-    private final PutEntryEncoder putEntryEncoder;
-    private final DeleteEntryEncoder deleteEntryEncoder;
     private final RejectEntryEncoder rejectEntryEncoder;
     private final UnifiedSet<DirectBuffer> keys;
 
@@ -111,8 +111,6 @@ public class KvCommandHandlers implements Encodable {
             BusServer<ClobDispatcher, ClobProvider> busServer) {
         this.busServer = Objects.requireNonNull(busServer, "busServer is null");
 
-        putEntryEncoder = new PutEntryEncoder();
-        deleteEntryEncoder = new DeleteEntryEncoder();
         rejectEntryEncoder = new RejectEntryEncoder();
         keys = new UnifiedSet<>();
 
@@ -123,7 +121,7 @@ public class KvCommandHandlers implements Encodable {
 
     private void onPutEntry(PutEntryDecoder decoder) {
         var key = decoder.getKey();
-        if (key.capacity() == 0) {
+        if (key == null || key.capacity() == 0) {
             sendReject(decoder.getApplicationId(),
                     decoder.getApplicationSequenceNumber(), key, "empty key");
             return;
@@ -140,7 +138,7 @@ public class KvCommandHandlers implements Encodable {
 
     private void onDeleteEntry(DeleteEntryDecoder decoder) {
         var key = decoder.getKey();
-        if (key.capacity() == 0) {
+        if (key == null || key.capacity() == 0) {
             sendReject(decoder.getApplicationId(),
                     decoder.getApplicationSequenceNumber(), key, "empty key");
             return;
@@ -160,11 +158,14 @@ public class KvCommandHandlers implements Encodable {
     private void sendReject(
             short applicationId, int applicationSequenceNumber,
             DirectBuffer key, String reason) {
-        BusServer.commit(busServer, rejectEntryEncoder.wrap(busServer.acquire())
+        rejectEntryEncoder.wrap(busServer.acquire())
                 .setApplicationId(applicationId)
-                .setApplicationSequenceNumber(applicationSequenceNumber)
-                .setKey(key)
-                .setReason(reason));
+                .setApplicationSequenceNumber(applicationSequenceNumber);
+        if (key != null && key.capacity() > 0) {
+            rejectEntryEncoder.setKey(key);
+        }
+        rejectEntryEncoder.setReason(reason);
+        BusServer.commit(busServer, rejectEntryEncoder);
     }
 
     /**
@@ -188,6 +189,9 @@ Key points:
 - `BusServer.commit(busServer, encoder)` publishes a newly constructed event (used for rejects).
 - `UnifiedSet` is from Eclipse Collections — no `java.util.HashSet` on the hot path.
 - The handler tracks which keys exist so it can validate deletes.
+- Optional fields like `Key` return `null` from the decoder when not present in the inbound message.
+  Guard with `key == null || key.capacity() == 0` and skip `setKey` on the reject encoder when the
+  key is absent — calling `setKey((DirectBuffer) null)` will NPE.
 
 ---
 
@@ -250,6 +254,7 @@ public class KvStoreClient implements Encodable {
         store.remove(key);
     }
 
+    @SuppressWarnings("PMD.UnusedFormalParameter")
     private void onRejectEntry(RejectEntryDecoder decoder) {
         rejectCount++;
     }
@@ -289,6 +294,9 @@ Key points:
 - `@Command(readOnly = true)` exposes the `get` method in the shell without side effects.
 - `@Command(path = "status")` wires the `encode` method to the shell's `status` path.
 - `UnifiedMap` from Eclipse Collections replaces `java.util.HashMap`.
+- `onRejectEntry` does not read any field off the decoder in this example, so PMD flags the
+  parameter as unused. Either suppress the warning (as shown) or extend the body to read a
+  field (e.g., `lastRejectReason = decoder.reasonAsString()`).
 
 ---
 
