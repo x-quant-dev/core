@@ -92,6 +92,15 @@ public class KvCommandHandlersTest {
         }
 
         @Test
+        void repeated_put_updates_value() {
+            put("hello", "world");
+            put("hello", "there");
+
+            then(handler.getKeyCount()).isEqualTo(1);
+            then(BufferUtils.toAsciiString(handler.get(BufferUtils.fromAsciiString("hello")))).isEqualTo("there");
+        }
+
+        @Test
         void multiple_puts_track_each_key() {
             put("a", "1");
             put("b", "2");

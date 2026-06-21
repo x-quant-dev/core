@@ -31,22 +31,25 @@ public class KvInjector extends Injector {
     }
 
     /**
-     * Put new entry.
+     * Puts a new entry.
+     *
+     * @param key the key
+     * @param value the value
      */
     @Allocation
     @Command
-    public void putEntry(int id, String value) {
-
+    public void putEntry(String key, String value) {
+        send("putEntry", "key=" + key, "value=" + value);
     }
 
     /**
-     * Remove entry
+     * Removes an entry.
      *
-     * @param id the identifier of the record to cancel.
+     * @param key the key of the record to cancel.
      */
     @Allocation
     @Command
-    public void removeEntry(int id) {
-
+    public void removeEntry(String key) {
+        send("deleteEntry", "key=" + key);
     }
 }

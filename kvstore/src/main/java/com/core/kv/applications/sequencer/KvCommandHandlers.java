@@ -11,7 +11,7 @@ import com.core.infrastructure.encoding.Encodable;
 import com.core.infrastructure.encoding.ObjectEncoder;
 import com.core.platform.bus.BusServer;
 import org.agrona.DirectBuffer;
-import org.eclipse.collections.impl.set.mutable.UnifiedSet;
+import org.agrona.collections.Object2ObjectHashMap;
 
 import java.util.Objects;
 
@@ -26,7 +26,8 @@ public class KvCommandHandlers implements Encodable {
 
     private final BusServer<KvDispatcher, KvProvider> busServer;
     private final RejectEntryEncoder rejectEntryEncoder;
-    private final UnifiedSet<DirectBuffer> keys;
+    // private final UnifiedSet<DirectBuffer> keys;
+    private final Object2ObjectHashMap<DirectBuffer, DirectBuffer> store;
 
     /**
      * Creates a {@code KvCommandHandlers} and subscribes to
@@ -38,13 +39,17 @@ public class KvCommandHandlers implements Encodable {
         this.busServer = Objects.requireNonNull(busServer, "busServer is null");
 
         rejectEntryEncoder = new RejectEntryEncoder();
-        keys = new UnifiedSet<>();
+        store = new Object2ObjectHashMap<>();
 
         var dispatcher = busServer.getDispatcher();
         dispatcher.addPutEntryListener(this::onPutEntry);
         dispatcher.addDeleteEntryListener(this::onDeleteEntry);
     }
 
+    /**
+     * Handler for add/put entry commands.
+     * @param decoder for PutEntryDecoder commands
+     */
     private void onPutEntry(PutEntryDecoder decoder) {
         var key = decoder.getKey();
         if (key == null || key.capacity() == 0) {
@@ -53,13 +58,23 @@ public class KvCommandHandlers implements Encodable {
             return;
         }
 
+        var value = decoder.getValue();
+        if (value == null || value.capacity() == 0) {
+            sendReject(decoder.getApplicationId(),
+                    decoder.getApplicationSequenceNumber(), key, "empty value");
+            return;
+        }
+
         BusServer.copy(busServer, decoder);
 
-        if (!keys.contains(key)) {
-            keys.add(BufferUtils.copy(key));
-        }
+        store.remove(key);
+        store.put(BufferUtils.copy(key), BufferUtils.copy(value));
     }
 
+    /**
+     * Handler for delete entry commands.
+     * @param decoder for DeleteEntryDecoder commands
+     */
     private void onDeleteEntry(DeleteEntryDecoder decoder) {
         var key = decoder.getKey();
         if (key == null || key.capacity() == 0) {
@@ -68,14 +83,14 @@ public class KvCommandHandlers implements Encodable {
             return;
         }
 
-        if (!keys.contains(key)) {
+        if (!store.containsKey(key)) {
             sendReject(decoder.getApplicationId(),
                     decoder.getApplicationSequenceNumber(), key, "key not found");
             return;
         }
 
         BusServer.copy(busServer, decoder);
-        keys.remove(key);
+        store.remove(key);
     }
 
     private void sendReject(
@@ -92,11 +107,15 @@ public class KvCommandHandlers implements Encodable {
     }
 
     int getKeyCount() {
-        return keys.size();
+        return store.size();
     }
 
     boolean containsKey(DirectBuffer key) {
-        return keys.contains(key);
+        return store.containsKey(key);
+    }
+
+    DirectBuffer get(DirectBuffer key) {
+        return store.get(key);
     }
 
     /**
@@ -108,7 +127,7 @@ public class KvCommandHandlers implements Encodable {
     @Override
     public void encode(ObjectEncoder encoder) {
         encoder.openMap()
-                .string("keys").number(keys.size())
+                .string("keys").number(store.size())
                 .closeMap();
     }
 }
