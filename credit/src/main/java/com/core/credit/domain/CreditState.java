@@ -2,6 +2,8 @@ package com.core.credit.domain;
 
 import org.agrona.DirectBuffer;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -25,6 +27,11 @@ public class CreditState {
     private final Map<DirectBuffer, Long> masterLimit = new HashMap<>();
     private final Map<DirectBuffer, Long> consumed    = new HashMap<>();
     private final Map<DirectBuffer, Boolean> hardStop = new HashMap<>();
+
+    // 24x7x365 additions
+    private final Map<DirectBuffer, Long> lastSnapshotSeqNo = new HashMap<>();
+    private final Map<DirectBuffer, Long> lastSnapshotAsOfMs = new HashMap<>();
+    private final Map<DirectBuffer, Deque<AcceptedTrade>> recentTrades = new HashMap<>();
 
     /**
      * Load or refresh an account's credit state (called at SOD or on limit update).
@@ -60,6 +67,19 @@ public class CreditState {
      * @return the {@link DecisionCode} describing the outcome
      */
     public DecisionCode applyOrder(DirectBuffer accountId, long notionalUsd) {
+        return applyOrder(accountId, notionalUsd, null, 0L);
+    }
+
+    /**
+     * Apply an order credit check with tracking for rolling window reconciliation.
+     *
+     * @param accountId    the account identifier buffer
+     * @param notionalUsd  the order notional in USD cents
+     * @param orderId      the unique order identifier
+     * @param acceptedAtMs the timestamp of the check in epoch milliseconds
+     * @return the {@link DecisionCode} describing the outcome
+     */
+    public DecisionCode applyOrder(DirectBuffer accountId, long notionalUsd, DirectBuffer orderId, long acceptedAtMs) {
         if (Boolean.TRUE.equals(hardStop.get(accountId))) {
             return DecisionCode.REJECT_HARD_STOP;
         }
@@ -76,7 +96,69 @@ public class CreditState {
 
         // Mutate state — identical on all nodes because inputs are identical.
         consumed.put(accountId, cons + notionalUsd);
+
+        // Record recent trade if tracking is active
+        if (orderId != null && acceptedAtMs > 0) {
+            var trades = recentTrades.computeIfAbsent(accountId, k -> new ArrayDeque<>());
+            trades.addLast(new AcceptedTrade(
+                    com.core.infrastructure.buffer.BufferUtils.copy(orderId),
+                    notionalUsd,
+                    acceptedAtMs
+            ));
+        }
+
         return DecisionCode.ACCEPT;
+    }
+
+    /**
+     * Apply an authoritative account balance snapshot and reconcile in-flight trades.
+     *
+     * @param accountId            the account identifier
+     * @param authorityLimitUsd    the new credit limit
+     * @param authorityConsumedUsd the new consumed baseline from risk/back-office
+     * @param asOfEpochMs          point-in-time timestamp of the authority baseline
+     * @param sequenceNo           monotonic sequence number of the snapshot
+     * @return the reconciled consumed amount in USD cents
+     */
+    public long applyAccountSnapshot(DirectBuffer accountId, long authorityLimitUsd, long authorityConsumedUsd, long asOfEpochMs, long sequenceNo) {
+        var lastSeq = lastSnapshotSeqNo.getOrDefault(accountId, -1L);
+        if (sequenceNo <= lastSeq) {
+            return consumed.getOrDefault(accountId, 0L);
+        }
+
+        // Sum trades accepted strictly after the snapshot's asOf timestamp
+        long inFlight = 0;
+        var trades = recentTrades.get(accountId);
+        if (trades != null) {
+            for (var t : trades) {
+                if (t.acceptedAtMs() > asOfEpochMs) {
+                    inFlight += t.notionalUsd();
+                }
+            }
+            // Prune trades older than or equal to asOfEpochMs
+            trades.removeIf(t -> t.acceptedAtMs() <= asOfEpochMs);
+        }
+
+        long reconciledConsumed = authorityConsumedUsd + inFlight;
+
+        // Ensure key is stable and copied if it's the first time we load the account
+        DirectBuffer storedKey = null;
+        for (var k : masterLimit.keySet()) {
+            if (k.equals(accountId)) {
+                storedKey = k;
+                break;
+            }
+        }
+        if (storedKey == null) {
+            storedKey = com.core.infrastructure.buffer.BufferUtils.copy(accountId);
+        }
+
+        masterLimit.put(storedKey, authorityLimitUsd);
+        consumed.put(storedKey, reconciledConsumed);
+        lastSnapshotSeqNo.put(storedKey, sequenceNo);
+        lastSnapshotAsOfMs.put(storedKey, asOfEpochMs);
+
+        return reconciledConsumed;
     }
 
     /**
@@ -127,6 +209,37 @@ public class CreditState {
      */
     public boolean isHardStopped(DirectBuffer accountId) {
         return Boolean.TRUE.equals(hardStop.get(accountId));
+    }
+
+    /**
+     * Returns the last applied snapshot sequence number, or -1 if none applied yet.
+     *
+     * @param accountId the account identifier buffer
+     * @return sequence number or -1
+     */
+    public long getLastSnapshotSeqNo(DirectBuffer accountId) {
+        return lastSnapshotSeqNo.getOrDefault(accountId, -1L);
+    }
+
+    /**
+     * Returns the last applied snapshot as-of timestamp in epoch milliseconds, or 0 if none.
+     *
+     * @param accountId the account identifier buffer
+     * @return epoch milliseconds or 0
+     */
+    public long getLastSnapshotAsOfMs(DirectBuffer accountId) {
+        return lastSnapshotAsOfMs.getOrDefault(accountId, 0L);
+    }
+
+    /**
+     * Returns the number of recent trades currently held for reconciliation.
+     *
+     * @param accountId the account identifier buffer
+     * @return trade count
+     */
+    public int getRecentTradeCount(DirectBuffer accountId) {
+        var trades = recentTrades.get(accountId);
+        return trades == null ? 0 : trades.size();
     }
 
     /**

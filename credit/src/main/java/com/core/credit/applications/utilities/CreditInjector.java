@@ -138,4 +138,29 @@ public class CreditInjector extends Injector {
         send("hardStopReleased",
                 "accountId=" + accountId);
     }
+
+    /**
+     * Sends an {@code AccountSnapshot} command to push authoritative balance updates.
+     *
+     * @param accountId            the account identifier
+     * @param authorityLimitUsd    the new credit limit in USD cents
+     * @param authorityConsumedUsd the baseline consumed amount in USD cents
+     * @param asOfEpochMs          the snapshot point-in-time timestamp
+     * @param sequenceNo           the snapshot sequence number
+     */
+    @Allocation
+    @Command
+    public void accountSnapshot(
+            String accountId,
+            long authorityLimitUsd,
+            long authorityConsumedUsd,
+            long asOfEpochMs,
+            long sequenceNo) {
+        send("accountSnapshot",
+                "accountId=" + accountId,
+                "authorityLimitUsd=" + authorityLimitUsd,
+                "authorityConsumedUsd=" + authorityConsumedUsd,
+                "asOfEpochMs=" + asOfEpochMs,
+                "sequenceNo=" + sequenceNo);
+    }
 }

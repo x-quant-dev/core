@@ -2,6 +2,8 @@ package com.core.credit.applications.sequencer;
 
 import com.core.credit.domain.CreditState;
 import com.core.credit.domain.DecisionCode;
+import com.core.credit.schema.AccountSnapshotAckEncoder;
+import com.core.credit.schema.AccountSnapshotDecoder;
 import com.core.credit.schema.CreditAcceptedEncoder;
 import com.core.credit.schema.CreditCheckRequestDecoder;
 import com.core.credit.schema.CreditDispatcher;
@@ -56,6 +58,7 @@ public class CreditCommandHandlers implements Encodable {
     private final HardStopEncoder hardStopEncoder;
     private final HardStopReleasedEncoder hardStopReleasedEncoder;
     private final LoadSodConsumedAckEncoder sodAckEncoder;
+    private final AccountSnapshotAckEncoder snapshotAckEncoder;
 
     /**
      * Creates a {@code CreditCommandHandlers} and subscribes to all credit commands
@@ -73,6 +76,7 @@ public class CreditCommandHandlers implements Encodable {
         hardStopEncoder        = new HardStopEncoder();
         hardStopReleasedEncoder = new HardStopReleasedEncoder();
         sodAckEncoder          = new LoadSodConsumedAckEncoder();
+        snapshotAckEncoder     = new AccountSnapshotAckEncoder();
 
         var dispatcher = busServer.getDispatcher();
         dispatcher.addCreditCheckRequestListener(this::onCreditCheckRequest);
@@ -80,6 +84,7 @@ public class CreditCommandHandlers implements Encodable {
         dispatcher.addHardStopListener(this::onHardStop);
         dispatcher.addHardStopReleasedListener(this::onHardStopReleased);
         dispatcher.addLoadSodConsumedListener(this::onLoadSodConsumed);
+        dispatcher.addAccountSnapshotListener(this::onAccountSnapshot);
     }
 
     /**
@@ -102,7 +107,12 @@ public class CreditCommandHandlers implements Encodable {
             return;
         }
 
-        var decision = state.applyOrder(accountId, notional);
+        long timestampMs = decoder.getTimestamp();
+        if (timestampMs > 0) {
+            timestampMs /= 1_000_000L; // convert nano to milli
+        }
+
+        var decision = state.applyOrder(accountId, notional, orderId, timestampMs);
 
         if (decision == DecisionCode.ACCEPT) {
             var consumed   = state.getConsumed(accountId);
@@ -197,6 +207,37 @@ public class CreditCommandHandlers implements Encodable {
                         .setAccountId(accountId)
                         .setConsumedUsd(consumed)
                         .setLimitUsd(limitUsd));
+    }
+
+    /**
+     * Reconciles authoritative balance snapshot and publishes ack event.
+     */
+    private void onAccountSnapshot(AccountSnapshotDecoder decoder) {
+        var accountId = decoder.getAccountId();
+        if (accountId == null || accountId.capacity() == 0) {
+            return;
+        }
+
+        var authorityLimit = decoder.getAuthorityLimitUsd();
+        var authorityConsumed = decoder.getAuthorityConsumedUsd();
+        var asOf = decoder.getAsOfEpochMs();
+        var seqNo = decoder.getSequenceNo();
+
+        if (seqNo <= state.getLastSnapshotSeqNo(accountId)) {
+            return; // ignore stale snapshot commands
+        }
+
+        long reconciledConsumed = state.applyAccountSnapshot(
+                accountId, authorityLimit, authorityConsumed, asOf, seqNo);
+
+        BusServer.commit(busServer,
+                snapshotAckEncoder.wrap(busServer.acquire())
+                        .setApplicationId(decoder.getApplicationId())
+                        .setApplicationSequenceNumber(decoder.getApplicationSequenceNumber())
+                        .setAccountId(accountId)
+                        .setReconciledConsumedUsd(reconciledConsumed)
+                        .setReconciledLimitUsd(authorityLimit)
+                        .setSequenceNo(seqNo));
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────────

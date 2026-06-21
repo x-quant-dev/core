@@ -1,6 +1,7 @@
 package com.core.credit.applications;
 
 import com.core.credit.domain.DecisionCode;
+import com.core.credit.schema.AccountSnapshotAckDecoder;
 import com.core.credit.schema.CreditAcceptedDecoder;
 import com.core.credit.schema.CreditDispatcher;
 import com.core.credit.schema.CreditProvider;
@@ -65,6 +66,7 @@ public class CreditStoreClient implements Encodable {
         dispatcher.addHardStopListener(this::onHardStop);
         dispatcher.addHardStopReleasedListener(this::onHardStopReleased);
         dispatcher.addLoadSodConsumedAckListener(this::onLoadSodConsumedAck);
+        dispatcher.addAccountSnapshotAckListener(this::onAccountSnapshotAck);
     }
 
     // ─── Event listeners ──────────────────────────────────────────────────────
@@ -114,6 +116,16 @@ public class CreditStoreClient implements Encodable {
         var key = BufferUtils.copy(accountId);
         limits.put(key, decoder.getLimitUsd());
         consumed.put(key, decoder.getConsumedUsd());
+    }
+
+    private void onAccountSnapshotAck(AccountSnapshotAckDecoder decoder) {
+        var accountId = decoder.getAccountId();
+        if (accountId == null || accountId.capacity() == 0) {
+            return;
+        }
+        var key = BufferUtils.copy(accountId);
+        limits.put(key, decoder.getReconciledLimitUsd());
+        consumed.put(key, decoder.getReconciledConsumedUsd());
     }
 
     // ─── Queries ──────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 package com.core.credit.applications;
 
+import com.core.credit.schema.AccountSnapshotAckEncoder;
 import com.core.credit.schema.CreditAcceptedEncoder;
 import com.core.credit.schema.CreditDispatcher;
 import com.core.credit.schema.CreditProvider;
@@ -142,6 +143,18 @@ class CreditStoreClientTest {
         }
     }
 
+    @Nested
+    class SnapshotReconciliationTests {
+
+        @Test
+        void snapshot_ack_updates_consumed_and_limit() {
+            publishSnapshotAck("ACCT1", 200_000_000L, 50_000_000L);
+
+            then(client.getLimit(BufferUtils.fromAsciiString("ACCT1"))).isEqualTo(200_000_000L);
+            then(client.getConsumed(BufferUtils.fromAsciiString("ACCT1"))).isEqualTo(50_000_000L);
+        }
+    }
+
     // ─── Event helpers ────────────────────────────────────────────────────────
 
     private void publishSodAck(String accountId, long consumed, long limit) {
@@ -187,5 +200,15 @@ class CreditStoreClientTest {
                 .setApplicationId((short) 1)
                 .setApplicationSequenceNumber(++seqNum)
                 .setAccountId(accountId));
+    }
+
+    private void publishSnapshotAck(String accountId, long limit, long reconciledConsumed) {
+        busClient.dispatch(new AccountSnapshotAckEncoder()
+                .setApplicationId((short) 1)
+                .setApplicationSequenceNumber(++seqNum)
+                .setAccountId(accountId)
+                .setReconciledLimitUsd(limit)
+                .setReconciledConsumedUsd(reconciledConsumed)
+                .setSequenceNo(1L));
     }
 }

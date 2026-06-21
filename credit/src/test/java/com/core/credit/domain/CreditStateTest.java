@@ -192,4 +192,72 @@ class CreditStateTest {
             then(decision).isEqualTo(DecisionCode.ACCEPT);
         }
     }
+
+    @Nested
+    class SnapshotReconciliationTests {
+
+        private final DirectBuffer ORDER_1 = BufferUtils.fromAsciiString("ORD_1");
+        private final DirectBuffer ORDER_2 = BufferUtils.fromAsciiString("ORD_2");
+        private final DirectBuffer ORDER_3 = BufferUtils.fromAsciiString("ORD_3");
+
+        @BeforeEach
+        void setup() {
+            state.loadAccount(ACCOUNT_A, LIMIT_1M, 0L);
+        }
+
+        @Test
+        void initial_snapshot_applies_limit_and_consumed() {
+            state.applyAccountSnapshot(ACCOUNT_A, LIMIT_1M, 15_000_000L, 1000L, 1L);
+
+            then(state.getLimit(ACCOUNT_A)).isEqualTo(LIMIT_1M);
+            then(state.getConsumed(ACCOUNT_A)).isEqualTo(15_000_000L);
+            then(state.getLastSnapshotSeqNo(ACCOUNT_A)).isEqualTo(1L);
+            then(state.getLastSnapshotAsOfMs(ACCOUNT_A)).isEqualTo(1000L);
+        }
+
+        @Test
+        void applyOrder_with_tracking_records_recent_trades() {
+            state.applyOrder(ACCOUNT_A, 5_000_000L, ORDER_1, 1005L);
+            state.applyOrder(ACCOUNT_A, 3_000_000L, ORDER_2, 1010L);
+
+            then(state.getRecentTradeCount(ACCOUNT_A)).isEqualTo(2);
+            then(state.getConsumed(ACCOUNT_A)).isEqualTo(8_000_000L);
+        }
+
+        @Test
+        void snapshot_reconciles_adding_only_trades_after_asOf() {
+            // 1. Accept trades at different timestamps
+            state.applyOrder(ACCOUNT_A, 1_000_000L, ORDER_1, 990L);  // Before/At asOf limit
+            state.applyOrder(ACCOUNT_A, 2_000_000L, ORDER_2, 1000L); // At asOf limit (inclusive)
+            state.applyOrder(ACCOUNT_A, 3_000_000L, ORDER_3, 1005L); // Strictly after asOf limit
+
+            then(state.getConsumed(ACCOUNT_A)).isEqualTo(6_000_000L);
+
+            // 2. Apply snapshot as of 1000L. Confirmed baseline consumed = 5,000,000.
+            // Reconciled should be: baseline (5M) + in-flight after 1000L (ORDER_3 = 3M) = 8,000,000.
+            var reconciled = state.applyAccountSnapshot(ACCOUNT_A, LIMIT_1M, 5_000_000L, 1000L, 1L);
+
+            then(reconciled).isEqualTo(8_000_000L);
+            then(state.getConsumed(ACCOUNT_A)).isEqualTo(8_000_000L);
+
+            // 3. Stale trades (ORDER_1, ORDER_2) should be pruned
+            then(state.getRecentTradeCount(ACCOUNT_A)).isEqualTo(1);
+        }
+
+        @Test
+        void stale_or_duplicate_snapshots_are_ignored() {
+            state.applyAccountSnapshot(ACCOUNT_A, LIMIT_1M, 10_000_000L, 1000L, 5L);
+
+            // Stale sequence number (4 <= 5) should be ignored, leaving consumed unchanged
+            var reconciledStale = state.applyAccountSnapshot(ACCOUNT_A, LIMIT_1M, 20_000_000L, 1050L, 4L);
+            then(reconciledStale).isEqualTo(10_000_000L);
+            then(state.getConsumed(ACCOUNT_A)).isEqualTo(10_000_000L);
+            then(state.getLastSnapshotSeqNo(ACCOUNT_A)).isEqualTo(5L);
+
+            // Duplicate sequence number (5 <= 5) should also be ignored
+            var reconciledDup = state.applyAccountSnapshot(ACCOUNT_A, LIMIT_1M, 20_000_000L, 1050L, 5L);
+            then(reconciledDup).isEqualTo(10_000_000L);
+            then(state.getConsumed(ACCOUNT_A)).isEqualTo(10_000_000L);
+        }
+    }
 }

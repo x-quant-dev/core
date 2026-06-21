@@ -124,5 +124,28 @@
             <optional id="2" name="ConsumedUsd"  type="long"/>
             <optional id="3" name="LimitUsd"     type="long"/>
         </message>
+
+        <!--
+            AccountSnapshot: Pushed by back-office whenever an authoritative
+            position refresh is available. Replaces daily startup-based SOD.
+        -->
+        <message id="12" name="AccountSnapshot">
+            <optional id="1" name="AccountId"            type="DirectBuffer"/>
+            <optional id="2" name="AuthorityLimitUsd"     type="long"/>
+            <optional id="3" name="AuthorityConsumedUsd"  type="long"/>
+            <optional id="4" name="AsOfEpochMs"           type="long"/>
+            <optional id="5" name="SequenceNo"            type="long"/>
+        </message>
+
+        <!--
+            AccountSnapshotAck: Confirms that the AccountSnapshot has been
+            applied and reconciled against in-flight orders.
+        -->
+        <message id="13" name="AccountSnapshotAck">
+            <optional id="1" name="AccountId"             type="DirectBuffer"/>
+            <optional id="2" name="ReconciledConsumedUsd" type="long"/>
+            <optional id="3" name="ReconciledLimitUsd"    type="long"/>
+            <optional id="4" name="SequenceNo"            type="long"/>
+        </message>
     </messages>
 </core>

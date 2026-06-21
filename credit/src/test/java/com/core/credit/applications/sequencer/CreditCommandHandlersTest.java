@@ -1,5 +1,7 @@
 package com.core.credit.applications.sequencer;
 
+import com.core.credit.schema.AccountSnapshotAckDecoder;
+import com.core.credit.schema.AccountSnapshotEncoder;
 import com.core.credit.schema.CreditAcceptedDecoder;
 import com.core.credit.schema.CreditCheckRequestEncoder;
 import com.core.credit.schema.CreditDispatcher;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.LocalTime;
 
 import static org.assertj.core.api.BDDAssertions.then;
@@ -49,11 +52,12 @@ class CreditCommandHandlersTest {
     private TestBusServer<CreditDispatcher, CreditProvider> busServer;
     private TestMessagePublisher eventPublisher;
     private CreditCommandHandlers handler;
+    private ManualTime time;
     private int appSeqNum;
 
     @BeforeEach
     void before_each() {
-        var time = new ManualTime(LocalTime.of(9, 30));
+        time = new ManualTime(LocalTime.of(9, 30));
         var logFactory = new TestLogFactory();
         var metricFactory = new MetricFactory(logFactory);
         var activatorFactory = new ActivatorFactory(logFactory, metricFactory);
@@ -253,12 +257,57 @@ class CreditCommandHandlersTest {
         }
     }
 
+    @Nested
+    class AccountSnapshotReconciliationTests {
+
+        @Test
+        void snapshot_ack_emitted_and_reconciled() {
+            // 1. Send credit check requests at specific timestamps
+            long baselineMs = time.nanos() / 1_000_000L;
+
+            // Trade 1: at baselineMs + 5
+            time.advanceTime(Duration.ofMillis(5));
+            creditCheck("ORD1", "ACCT1", "CLI1", 2_000_000L);
+            eventPublisher.removeAll();
+
+            // Trade 2: at baselineMs + 10
+            time.advanceTime(Duration.ofMillis(5));
+            creditCheck("ORD2", "ACCT1", "CLI1", 3_000_000L);
+            eventPublisher.removeAll();
+
+            // 2. Dispatch snapshot command as of baselineMs + 5.
+            // Baseline consumed = 10,000,000.
+            // Reconciled should be: baseline (10M) + Trade 2 (3M) = 13,000,000.
+            // Trade 1 (2M) was accepted at baselineMs + 5 (not after), so it is pruned.
+            accountSnapshot("ACCT1", 100_000_000L, 10_000_000L, baselineMs + 5, 1L);
+
+            AccountSnapshotAckDecoder ack = eventPublisher.remove();
+            then(BufferUtils.toAsciiString(ack.getAccountId())).isEqualTo("ACCT1");
+            then(ack.getReconciledConsumedUsd()).isEqualTo(13_000_000L);
+            then(ack.getReconciledLimitUsd()).isEqualTo(100_000_000L);
+            then(ack.getSequenceNo()).isEqualTo(1L);
+        }
+
+        @Test
+        void stale_snapshots_are_ignored() {
+            // Sequence 5
+            accountSnapshot("ACCT1", 100_000_000L, 10_000_000L, 1000L, 5L);
+            AccountSnapshotAckDecoder ack5 = eventPublisher.remove();
+            then(ack5.getReconciledConsumedUsd()).isEqualTo(10_000_000L);
+
+            // Sequence 4 (stale) - should be ignored and reconciled consumed remains same as seq 5 (10M)
+            accountSnapshot("ACCT1", 100_000_000L, 20_000_000L, 1050L, 4L);
+            then(eventPublisher.isEmpty()).isTrue();
+        }
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
     private void creditCheck(String orderId, String accountId, String clientId, long notional) {
         var encoder = new CreditCheckRequestEncoder()
                 .setApplicationId(APP_ID)
                 .setApplicationSequenceNumber(++appSeqNum)
+                .setTimestamp(time.nanos())
                 .setOrderId(orderId)
                 .setAccountId(accountId)
                 .setClientId(clientId)
@@ -272,6 +321,7 @@ class CreditCommandHandlersTest {
         var encoder = new SetCreditLimitEncoder()
                 .setApplicationId(APP_ID)
                 .setApplicationSequenceNumber(++appSeqNum)
+                .setTimestamp(time.nanos())
                 .setAccountId(accountId)
                 .setLimitUsd(limitUsd);
         busServer.getDispatcher().dispatch(encoder.toDecoder());
@@ -282,6 +332,7 @@ class CreditCommandHandlersTest {
         var encoder = new LoadSodConsumedEncoder()
                 .setApplicationId(APP_ID)
                 .setApplicationSequenceNumber(++appSeqNum)
+                .setTimestamp(time.nanos())
                 .setAccountId(accountId)
                 .setConsumedUsd(consumedUsd)
                 .setLimitUsd(limitUsd);
@@ -293,6 +344,7 @@ class CreditCommandHandlersTest {
         var encoder = new HardStopEncoder()
                 .setApplicationId(APP_ID)
                 .setApplicationSequenceNumber(++appSeqNum)
+                .setTimestamp(time.nanos())
                 .setAccountId(accountId)
                 .setReason(reason);
         busServer.getDispatcher().dispatch(encoder.toDecoder());
@@ -303,7 +355,22 @@ class CreditCommandHandlersTest {
         var encoder = new HardStopReleasedEncoder()
                 .setApplicationId(APP_ID)
                 .setApplicationSequenceNumber(++appSeqNum)
+                .setTimestamp(time.nanos())
                 .setAccountId(accountId);
+        busServer.getDispatcher().dispatch(encoder.toDecoder());
+        busServer.send();
+    }
+
+    private void accountSnapshot(String accountId, long limitUsd, long consumedUsd, long asOfEpochMs, long seqNo) {
+        var encoder = new AccountSnapshotEncoder()
+                .setApplicationId(APP_ID)
+                .setApplicationSequenceNumber(++appSeqNum)
+                .setTimestamp(time.nanos())
+                .setAccountId(accountId)
+                .setAuthorityLimitUsd(limitUsd)
+                .setAuthorityConsumedUsd(consumedUsd)
+                .setAsOfEpochMs(asOfEpochMs)
+                .setSequenceNo(seqNo);
         busServer.getDispatcher().dispatch(encoder.toDecoder());
         busServer.send();
     }
