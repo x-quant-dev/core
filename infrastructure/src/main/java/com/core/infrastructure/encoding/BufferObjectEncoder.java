@@ -17,7 +17,7 @@ class BufferObjectEncoder implements MutableObjectEncoder {
     private final boolean[] inKey;
     private final char[] type;
     private final int[] elementIndex;
-    private Runnable[] finishLevelListener;
+    private final Runnable[] finishLevelListener;
 
     private MutableDirectBuffer buffer;
     private int offset;
