@@ -87,7 +87,7 @@ public class Sequencer implements Activatable, Encodable {
     private final Runnable cachedSendHeartbeat;
 
     @Property(write = true)
-    private long heartbeatTimeout;
+    private final long heartbeatTimeout;
     @Property
     private long heartbeatTaskId;
     @Property
