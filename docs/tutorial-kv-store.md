@@ -7,7 +7,7 @@ By the end you will have touched every layer of the system:
 
 | Concept | What you'll do |
 |---|---|
-| Schema definition | Define `PutEntry`, `DeleteEntry`, and `RejectEntry` messages in XML |
+| Schema definition | Define `PutEntry`, `DeleteEntry`, and `RejectEntry` messages in a standalone schema XML |
 | Command handling | Validate commands and produce events on the sequencer |
 | Event-driven state | Rebuild state from the ordered event log on the client |
 | Shell integration | Expose `get`, `status`, and `send` commands via telnet |
@@ -21,35 +21,90 @@ By the end you will have touched every layer of the system:
 Messages are defined in XML and code-generated into typed encoders and decoders.
 Each message carries an 18-byte header with `applicationId`, `applicationSequenceNumber`, `timestamp`, and other fields.
 
-Add the following messages to `clob-schema.xml` (or create a separate `kv-schema.xml`).
-Use message IDs starting at 20 to avoid conflicts with the existing CLOB messages.
+Keep the KV store schema isolated from other domain schemas. Create a dedicated
+`kv-store-schema.xml` alongside `clob-schema.xml` in `clob/src/main/resources/` —
+do **not** add KV messages to `clob-schema.xml`. Each schema XML generates its own
+`Schema`/`Dispatcher`/`Provider` classes under its own package, so keeping them
+separate avoids coupling the KV store to unrelated CLOB message IDs and lets each
+schema evolve independently.
 
 ```xml
-<!-- Key/Value store messages -->
-<message id="20" name="PutEntry">
-    <optional name="Key" type="DirectBuffer"/>
-    <optional name="Value" type="DirectBuffer"/>
-</message>
+<core package="com.core.kv.schema" version="1" prefix="Kv">
+    <properties>
+        <property name="heartbeatMessageName" value="heartbeat"/>
+        <property name="applicationIdField" value="applicationId"/>
+        <property name="applicationDefinitionMessageName" value="applicationDefinition"/>
+        <property name="applicationDefinitionNameField" value="name"/>
+    </properties>
 
-<message id="21" name="DeleteEntry">
-    <optional name="Key" type="DirectBuffer"/>
-</message>
+    <header>
+        <field name="ApplicationId" type="short" primary-key="true"/>
+        <field name="ApplicationSequenceNumber" type="int"/>
+        <field name="Timestamp" type="long" metadata="timestamp"/>
+        <field name="OptionalFieldsIndex" type="short"/>
+        <field name="LeaderEpoch" type="int"/>
+        <field name="SchemaVersion" type="byte"/>
+        <field name="MessageType" type="byte"/>
+    </header>
 
-<message id="22" name="RejectEntry">
-    <optional name="Key" type="DirectBuffer"/>
-    <optional name="Reason" type="DirectBuffer"/>
-</message>
+    <messages>
+        <message id="1" name="Heartbeat"/>
+
+        <message id="2" name="ApplicationDefinition" entity="application">
+            <optional id="1" name="Name" type="DirectBuffer" key="true" description="the name of the application"/>
+        </message>
+
+        <message id="3" name="PutEntry">
+            <optional id="1" name="Key" type="DirectBuffer"/>
+            <optional id="2" name="Value" type="DirectBuffer"/>
+        </message>
+
+        <message id="4" name="DeleteEntry">
+            <optional id="1" name="Key" type="DirectBuffer"/>
+        </message>
+
+        <message id="5" name="RejectEntry">
+            <optional id="1" name="Key" type="DirectBuffer"/>
+            <optional id="2" name="Reason" type="DirectBuffer"/>
+        </message>
+    </messages>
+</core>
 ```
 
-After running the build (`./gradlew build`), the code generator produces:
+Then register a generation task for the new schema in `clob/build.gradle.kts`:
 
+```kotlin
+val generateKvSchema by tasks.registering(GenerateSchemaTask::class) {
+    schemaXml = "${projectDir}/src/main/resources/kv-store-schema.xml"
+    outputDir = layout.buildDirectory.dir("generated/kv-schema").get().asFile.absolutePath
+}
+sourceSets.named("main") {
+    java.srcDir(layout.buildDirectory.dir("generated/kv-schema"))
+}
+
+tasks.compileJava {
+    dependsOn(generateSchema, generateKvSchema, generateSbeSchema)
+}
+```
+
+> **Note:** when a message has more than one `optional` element, each one needs a unique `id`
+> attribute. The code generator keys optional-field dispatch off this id; omitting it produces a
+> duplicate `case 0:` in the generated decoder and breaks compilation.
+>
+> **Note:** every schema needs the `Heartbeat` and `ApplicationDefinition` messages plus the four
+> `properties` shown above — the bus framework relies on them for session management.
+
+After running the build (`./gradlew build`), the code generator produces the following classes
+under `com.core.kv.schema`:
+
+- `KvSchema`, `KvDispatcher`, `KvProvider`
 - `PutEntryEncoder` / `PutEntryDecoder`
 - `DeleteEntryEncoder` / `DeleteEntryDecoder`
 - `RejectEntryEncoder` / `RejectEntryDecoder`
 
 These are flyweight accessors over `DirectBuffer` — zero allocation, zero copying on the hot path.
 
-The generated `ClobDispatcher` also gets new listener-registration methods:
+The generated `KvDispatcher` also gets new listener-registration methods:
 
 ```java
 dispatcher.addPutEntryListener(this::onPutEntry);
@@ -69,13 +124,11 @@ This follows the same pattern as `ClobCommandHandlers`.
 ```java
 package com.core.clob.applications.sequencer;
 
-import com.core.clob.schema.ClobDispatcher;
-import com.core.clob.schema.ClobProvider;
-import com.core.clob.schema.DeleteEntryDecoder;
-import com.core.clob.schema.DeleteEntryEncoder;
-import com.core.clob.schema.PutEntryDecoder;
-import com.core.clob.schema.PutEntryEncoder;
-import com.core.clob.schema.RejectEntryEncoder;
+import com.core.kv.schema.DeleteEntryDecoder;
+import com.core.kv.schema.KvDispatcher;
+import com.core.kv.schema.KvProvider;
+import com.core.kv.schema.PutEntryDecoder;
+import com.core.kv.schema.RejectEntryEncoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.command.Command;
 import com.core.infrastructure.encoding.Encodable;
@@ -95,9 +148,7 @@ import java.util.Objects;
  */
 public class KvCommandHandlers implements Encodable {
 
-    private final BusServer<ClobDispatcher, ClobProvider> busServer;
-    private final PutEntryEncoder putEntryEncoder;
-    private final DeleteEntryEncoder deleteEntryEncoder;
+    private final BusServer<KvDispatcher, KvProvider> busServer;
     private final RejectEntryEncoder rejectEntryEncoder;
     private final UnifiedSet<DirectBuffer> keys;
 
@@ -108,11 +159,9 @@ public class KvCommandHandlers implements Encodable {
      * @param busServer the sequencer bus
      */
     public KvCommandHandlers(
-            BusServer<ClobDispatcher, ClobProvider> busServer) {
+            BusServer<KvDispatcher, KvProvider> busServer) {
         this.busServer = Objects.requireNonNull(busServer, "busServer is null");
 
-        putEntryEncoder = new PutEntryEncoder();
-        deleteEntryEncoder = new DeleteEntryEncoder();
         rejectEntryEncoder = new RejectEntryEncoder();
         keys = new UnifiedSet<>();
 
@@ -123,7 +172,7 @@ public class KvCommandHandlers implements Encodable {
 
     private void onPutEntry(PutEntryDecoder decoder) {
         var key = decoder.getKey();
-        if (key.capacity() == 0) {
+        if (key == null || key.capacity() == 0) {
             sendReject(decoder.getApplicationId(),
                     decoder.getApplicationSequenceNumber(), key, "empty key");
             return;
@@ -140,7 +189,7 @@ public class KvCommandHandlers implements Encodable {
 
     private void onDeleteEntry(DeleteEntryDecoder decoder) {
         var key = decoder.getKey();
-        if (key.capacity() == 0) {
+        if (key == null || key.capacity() == 0) {
             sendReject(decoder.getApplicationId(),
                     decoder.getApplicationSequenceNumber(), key, "empty key");
             return;
@@ -160,11 +209,14 @@ public class KvCommandHandlers implements Encodable {
     private void sendReject(
             short applicationId, int applicationSequenceNumber,
             DirectBuffer key, String reason) {
-        BusServer.commit(busServer, rejectEntryEncoder.wrap(busServer.acquire())
+        rejectEntryEncoder.wrap(busServer.acquire())
                 .setApplicationId(applicationId)
-                .setApplicationSequenceNumber(applicationSequenceNumber)
-                .setKey(key)
-                .setReason(reason));
+                .setApplicationSequenceNumber(applicationSequenceNumber);
+        if (key != null && key.capacity() > 0) {
+            rejectEntryEncoder.setKey(key);
+        }
+        rejectEntryEncoder.setReason(reason);
+        BusServer.commit(busServer, rejectEntryEncoder);
     }
 
     /**
@@ -188,6 +240,9 @@ Key points:
 - `BusServer.commit(busServer, encoder)` publishes a newly constructed event (used for rejects).
 - `UnifiedSet` is from Eclipse Collections — no `java.util.HashSet` on the hot path.
 - The handler tracks which keys exist so it can validate deletes.
+- Optional fields like `Key` return `null` from the decoder when not present in the inbound message.
+  Guard with `key == null || key.capacity() == 0` and skip `setKey` on the reject encoder when the
+  key is absent — calling `setKey((DirectBuffer) null)` will NPE.
 
 ---
 
@@ -199,9 +254,9 @@ Any number of clients can run — each independently replays the same event log 
 ```java
 package com.core.clob.applications;
 
-import com.core.clob.schema.DeleteEntryDecoder;
-import com.core.clob.schema.PutEntryDecoder;
-import com.core.clob.schema.RejectEntryDecoder;
+import com.core.kv.schema.DeleteEntryDecoder;
+import com.core.kv.schema.PutEntryDecoder;
+import com.core.kv.schema.RejectEntryDecoder;
 import com.core.infrastructure.buffer.BufferUtils;
 import com.core.infrastructure.command.Command;
 import com.core.infrastructure.encoding.Encodable;
@@ -250,6 +305,7 @@ public class KvStoreClient implements Encodable {
         store.remove(key);
     }
 
+    @SuppressWarnings("PMD.UnusedFormalParameter")
     private void onRejectEntry(RejectEntryDecoder decoder) {
         rejectCount++;
     }
@@ -289,6 +345,9 @@ Key points:
 - `@Command(readOnly = true)` exposes the `get` method in the shell without side effects.
 - `@Command(path = "status")` wires the `encode` method to the shell's `status` path.
 - `UnifiedMap` from Eclipse Collections replaces `java.util.HashMap`.
+- `onRejectEntry` does not read any field off the decoder in this example, so PMD flags the
+  parameter as unused. Either suppress the warning (as shown) or extend the body to read a
+  field (e.g., `lastRejectReason = decoder.reasonAsString()`).
 
 ---
 
@@ -308,7 +367,7 @@ source -s sysout-log.cmd
 source -s telnet.cmd inet:0.0.0.0:7001
 
 # ── Schema ────────────────────────────────────────────────────
-create /bus/schema com.core.clob.schema.ClobSchema
+create /bus/schema com.core.kv.schema.KvSchema
 
 # ── Bus Client ────────────────────────────────────────────────
 create /bus com.core.platform.bus.mold.MoldBusClient \
@@ -322,8 +381,8 @@ create /busServer com.core.platform.bus.mold.MoldBusServer \
 create seq01a com.core.platform.applications.sequencer.Sequencer @/busServer SEQ01
 create seq01a/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
 
-# ── KV Store Client ──────────────────────────────────────────
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+# ── KV Store Client (FIXME - REQUIRES UPDATE - FILE REMOVED) ─────
+# create kvStore com.core.clob.applications.KvStoreClient @/bus
 
 # ── Injector (for shell-driven sends) ────────────────────────
 create inject01a com.core.platform.applications.utilities.Injector @/bus INJ01
@@ -416,7 +475,7 @@ Adding it to the KV store takes three lines.
 source network-local.cmd
 source -s sysout-log.cmd
 source -s telnet.cmd inet:0.0.0.0:7001
-create /bus/schema com.core.clob.schema.ClobSchema
+create /bus/schema com.core.kv.schema.KvSchema
 create /bus com.core.platform.bus.mold.MoldBusClient \
     client @/bus/schema $event_channel $command_channel $discovery_channel
 
@@ -429,7 +488,7 @@ create seq01a com.core.platform.applications.sequencer.Sequencer @/busServer SEQ
 create seq01a/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
 
 # KV Client + Injector
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+create kvStore com.core.clob.applications.ClobClient @/bus
 create inject01a com.core.platform.applications.utilities.Injector @/bus INJ01
 inject01a/start
 
@@ -454,7 +513,7 @@ seq01a/start
 source network-local.cmd
 source -s sysout-log.cmd
 source -s telnet.cmd inet:0.0.0.0:7002
-create /bus/schema com.core.clob.schema.ClobSchema
+create /bus/schema com.core.kv.schema.KvSchema
 create /bus com.core.platform.bus.mold.MoldBusClient \
     client @/bus/schema $event_channel $command_channel $discovery_channel
 
@@ -467,7 +526,7 @@ create seq01b com.core.platform.applications.sequencer.Sequencer @/busServer SEQ
 create seq01b/kvHandlers com.core.clob.applications.sequencer.KvCommandHandlers @/busServer
 
 # KV Client (receives same events, builds same state)
-create kvStore com.core.clob.applications.KvStoreClient @/bus
+create kvStore com.core.clob.applications.ClobClient @/bus
 
 # HA
 source -s promotion-guard.cmd
@@ -521,11 +580,11 @@ it acquires the lease, validates it is caught up, and starts sequencing from `la
 
 | Component | Lines |
 |---|---|
-| Schema XML | ~12 |
+| `kv-store-schema.xml` | ~45 |
 | `KvCommandHandlers.java` | ~75 |
 | `KvStoreClient.java` | ~55 |
 | `kv-store.cmd` | ~20 |
-| **Total** | **~162** |
+| **Total** | **~195** |
 
 ---
 

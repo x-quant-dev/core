@@ -16,3 +16,4 @@
 *.jks
 **/bin/**
 **/*.class
+.claude/
