@@ -3,7 +3,7 @@ package com.core.infrastructure.encoding;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 
-interface ValueEncoder {
+public interface ValueEncoder {
 
     boolean isMachineReadable();
 
