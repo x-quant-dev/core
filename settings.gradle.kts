@@ -3,3 +3,5 @@ include("infrastructure")
 include("platform")
 include("clob")
 include("kvstore")
+
+include("credit")

@@ -1,0 +1,151 @@
+<core package="com.core.credit.schema" version="1" prefix="Credit">
+    <properties>
+        <property name="heartbeatMessageName" value="heartbeat"/>
+        <property name="applicationIdField" value="applicationId"/>
+        <property name="applicationDefinitionMessageName" value="applicationDefinition"/>
+        <property name="applicationDefinitionNameField" value="name"/>
+    </properties>
+
+    <header>
+        <field name="ApplicationId" type="short" primary-key="true"/>
+        <field name="ApplicationSequenceNumber" type="int"/>
+        <field name="Timestamp" type="long" metadata="timestamp"/>
+        <field name="OptionalFieldsIndex" type="short"/>
+        <field name="LeaderEpoch" type="int"/>
+        <field name="SchemaVersion" type="byte"/>
+        <field name="MessageType" type="byte"/>
+    </header>
+
+    <messages>
+        <!-- Infrastructure messages (required by every schema) -->
+        <message id="1" name="Heartbeat"/>
+
+        <message id="2" name="ApplicationDefinition" entity="application">
+            <optional id="1" name="Name" type="DirectBuffer" key="true"
+                      description="the name of the application"/>
+        </message>
+
+        <!-- ─── Credit-check commands (sent by trading clients) ─── -->
+
+        <!--
+            CreditCheckRequest: a trading client asks the sequencer
+            to check and, if accepted, reserve notionalUSD of credit
+            against the named account.
+        -->
+        <message id="3" name="CreditCheckRequest">
+            <optional id="1" name="OrderId"       type="DirectBuffer"/>
+            <optional id="2" name="AccountId"     type="DirectBuffer"/>
+            <optional id="3" name="ClientId"      type="DirectBuffer"/>
+            <optional id="4" name="CurrencyPair"  type="DirectBuffer"/>
+            <optional id="5" name="ProductType"   type="DirectBuffer"/>
+            <optional id="6" name="NotionalUsd"   type="long"/>
+            <optional id="7" name="Side"          type="byte"/>
+        </message>
+
+        <!-- ─── Credit-check results (published as events) ─── -->
+
+        <!--
+            CreditAccepted: sequencer accepted the order; consumed is updated.
+            Published instead of copying the inbound command so we can add
+            the sequencer-assigned consumed / remaining amounts.
+        -->
+        <message id="4" name="CreditAccepted">
+            <optional id="1" name="OrderId"         type="DirectBuffer"/>
+            <optional id="2" name="AccountId"       type="DirectBuffer"/>
+            <optional id="3" name="ClientId"        type="DirectBuffer"/>
+            <optional id="4" name="NotionalUsd"     type="long"/>
+            <optional id="5" name="ConsumedAfterUsd" type="long"/>
+            <optional id="6" name="RemainingUsd"    type="long"/>
+        </message>
+
+        <!--
+            CreditRejected: sequencer rejected the order.
+            DecisionCode is encoded as a byte (enum ordinal).
+        -->
+        <message id="5" name="CreditRejected">
+            <optional id="1" name="OrderId"      type="DirectBuffer"/>
+            <optional id="2" name="AccountId"    type="DirectBuffer"/>
+            <optional id="3" name="ClientId"     type="DirectBuffer"/>
+            <optional id="4" name="NotionalUsd"  type="long"/>
+            <optional id="5" name="DecisionCode" type="byte"/>
+            <optional id="6" name="Reason"       type="DirectBuffer"/>
+        </message>
+
+        <!-- ─── Credit management commands (sent by risk/ops) ─── -->
+
+        <!--
+            SetCreditLimit: set or update the master USD limit for an account.
+            Applied deterministically by the sequencer.
+        -->
+        <message id="6" name="SetCreditLimit">
+            <optional id="1" name="AccountId"    type="DirectBuffer"/>
+            <optional id="2" name="LimitUsd"     type="long"/>
+        </message>
+
+        <!--
+            SetCreditLimitAck: confirms a SetCreditLimit was applied.
+        -->
+        <message id="7" name="SetCreditLimitAck">
+            <optional id="1" name="AccountId"    type="DirectBuffer"/>
+            <optional id="2" name="LimitUsd"     type="long"/>
+        </message>
+
+        <!--
+            HardStop: immediately freeze an account (no new orders accepted).
+            Triggered by the sequencer on confirmed breach, or by ops.
+        -->
+        <message id="8" name="HardStop">
+            <optional id="1" name="AccountId"    type="DirectBuffer"/>
+            <optional id="2" name="Reason"       type="DirectBuffer"/>
+        </message>
+
+        <!--
+            HardStopReleased: lift a hard stop (ops command).
+        -->
+        <message id="9" name="HardStopReleased">
+            <optional id="1" name="AccountId"    type="DirectBuffer"/>
+        </message>
+
+        <!--
+            LoadSodConsumed: replay command to seed the sequencer's in-memory
+            state with start-of-day consumed values (from trade_log).
+        -->
+        <message id="10" name="LoadSodConsumed">
+            <optional id="1" name="AccountId"    type="DirectBuffer"/>
+            <optional id="2" name="ConsumedUsd"  type="long"/>
+            <optional id="3" name="LimitUsd"     type="long"/>
+        </message>
+
+        <!--
+            LoadSodConsumedAck: confirms SOD load was applied.
+        -->
+        <message id="11" name="LoadSodConsumedAck">
+            <optional id="1" name="AccountId"    type="DirectBuffer"/>
+            <optional id="2" name="ConsumedUsd"  type="long"/>
+            <optional id="3" name="LimitUsd"     type="long"/>
+        </message>
+
+        <!--
+            AccountSnapshot: Pushed by back-office whenever an authoritative
+            position refresh is available. Replaces daily startup-based SOD.
+        -->
+        <message id="12" name="AccountSnapshot">
+            <optional id="1" name="AccountId"            type="DirectBuffer"/>
+            <optional id="2" name="AuthorityLimitUsd"     type="long"/>
+            <optional id="3" name="AuthorityConsumedUsd"  type="long"/>
+            <optional id="4" name="AsOfEpochMs"           type="long"/>
+            <optional id="5" name="SequenceNo"            type="long"/>
+        </message>
+
+        <!--
+            AccountSnapshotAck: Confirms that the AccountSnapshot has been
+            applied and reconciled against in-flight orders.
+        -->
+        <message id="13" name="AccountSnapshotAck">
+            <optional id="1" name="AccountId"             type="DirectBuffer"/>
+            <optional id="2" name="ReconciledConsumedUsd" type="long"/>
+            <optional id="3" name="ReconciledLimitUsd"    type="long"/>
+            <optional id="4" name="SequenceNo"            type="long"/>
+        </message>
+    </messages>
+</core>

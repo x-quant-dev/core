@@ -1,0 +1,1320 @@
+FX CREDIT ENGINE
+Three Distributed Design Patterns
+Architecture, Implementation & Trade-off Analysis
+Design 1  Optimistic Local Cache + Async Correction
+Design 2  Token Bucket with Centralised Top-Up
+Design 3  Atomic Broadcast / Total Order via Aeron Cluster
+Audience: Senior Engineers · Architects · AI Developers
+Version 1.0   ·   21 June 2026
+1. Introduction & Problem Statement
+In institutional FX trading, every order submitted by a client must be checked against a pre-agreed credit limit before it can be accepted and sent for execution. The credit limit expresses the maximum notional USD exposure the firm is willing to carry for that client at any point in time.
+1.1 The Centralised Baseline
+The canonical implementation uses a single authoritative credit service. Every order triggers a synchronous request/reply round-trip: the trading client sends a CreditCheckRequest, waits for a CreditCheckResponse, and only then submits the order to the execution engine.
+  Trading Client A  ──req──►  Credit Service  ──reply──►  Client A  [proceed]
+  Trading Client B  ─────────────────req──►  Credit Service  ──reply──►  Client B
+  Trading Client C  ──────────────────────────────req──►  Credit Service  ──reply──►  Client C
+ 
+  Burst of 3 orders: Client C waits 3 × RTT before receiving a decision.
+1.2 Centralised Pros & Cons
+Property
+Centralised Model
+Consistency
+Hard guarantee — credit state is always accurate
+SOD recovery
+Single service replays trades from one source
+Latency (single order)
+One RTT (~5–30 µs on Aeron IPC)
+Burst latency
+Compounds: N orders = N × RTT for last order
+Throughput ceiling
+Bounded by sequential request/reply
+Complexity
+Low — single stateful service
+1.3 Why Distributed?
+The three designs in this document remove or reduce the sequential request/reply bottleneck. Each makes a different trade-off between latency, correctness, and operational complexity. The document covers:
+Design 1 — Optimistic Local Cache + Async Correction: lowest latency, eventual consistency, small overshoot window
+Design 2 — Token Bucket per Client: sub-microsecond hot path, bounded slack, simple to operate
+Design 3 — Atomic Broadcast via Aeron Cluster: exact consistency without request/reply compounding, one sequencer RTT
+2. Domain Objects, API Contracts & Schemas
+All three designs share the same domain model and wire contracts. Define these once and reuse across implementations.
+2.1 Core Domain Objects
+Order
+Order.java
+// Order.java
+public record Order(
+    String  orderId,         // UUID, client-generated
+    String  accountId,       // maps to CreditAccount
+    String  clientId,        // originating trading client
+    String  currencyPair,    // e.g. "EUR/USD"
+    String  productType,     // SPOT | FWD | NDF | OPTION
+    Side    side,            // BUY | SELL
+    long    notionalBase,    // in base currency minor units (e.g. cents)
+    double  fxRate,          // rate at time of submission (indicative)
+    long    notionalUSD,     // pre-computed: notionalBase * fxRate (cents)
+    Instant submittedAt
+) {}
+ 
+public enum Side  { BUY, SELL }
+CreditAccount
+CreditAccount.java
+// CreditAccount.java
+public record CreditAccount(
+    String  accountId,
+    String  clientName,
+    long    masterLimitUSD,   // total credit limit in USD cents
+    long    consumedUSD,      // running total consumed
+    long    reservedBuffer,   // held back from shard allocation (Design 1&2)
+    Instant lastUpdated
+) {
+    public long availableUSD() {
+        return masterLimitUSD - consumedUSD;
+    }
+    public boolean wouldBreachLimit(long additionalUSD) {
+        return consumedUSD + additionalUSD > masterLimitUSD;
+    }
+}
+CreditDecision
+CreditDecision.java
+// CreditDecision.java
+public record CreditDecision(
+    String          orderId,
+    String          accountId,
+    DecisionCode    code,
+    long            consumedAfterUSD,    // post-decision consumed total
+    long            remainingUSD,
+    String          reason,              // populated on REJECT
+    Instant         decidedAt
+) {}
+ 
+public enum DecisionCode {
+    ACCEPT,
+    REJECT_LIMIT_EXCEEDED,
+    REJECT_SHARD_EXHAUSTED,    // Design 1 & 2
+    REJECT_HARD_STOP,          // breach circuit breaker
+    REJECT_SEQUENCE_GAP        // Design 3
+}
+2.2 Event Contracts (all designs publish these)
+Event Contracts
+// TradeExecutedEvent — published async after ACCEPT
+public record TradeExecutedEvent(
+    String  eventId,
+    String  orderId,
+    String  accountId,
+    String  clientId,
+    long    notionalUSD,
+    double  fxRateUsed,
+    Instant executedAt
+) {}
+ 
+// CreditBreachEvent — published when aggregate consumed > masterLimit
+public record CreditBreachEvent(
+    String  accountId,
+    long    masterLimitUSD,
+    long    actualConsumedUSD,
+    long    overshootUSD,
+    Instant detectedAt
+) {}
+ 
+// ShardGrantEvent — Design 1 & 2 only
+public record ShardGrantEvent(
+    String  accountId,
+    String  clientId,
+    long    allocationUSD,
+    Instant validFrom,
+    Instant expiresAt       // null = no expiry until revoked
+) {}
+ 
+// HardStopEvent — broadcast on confirmed breach
+public record HardStopEvent(
+    String  accountId,
+    String  reason,
+    Instant issuedAt
+) {}
+2.3 Static Configuration (application.yaml)
+application.yaml
+# application.yaml — shared across all three designs
+credit:
+  shard-reserve-pct: 0.20          # hold 20% back from shard allocation
+  rebalance-interval-ms: 5000      # how often CreditManager rebalances shards
+  hard-stop-on-breach: true        # immediately freeze account on breach
+  breach-alert-channel: "aeron:udp?endpoint=239.1.1.10:50010"
+ 
+aeron:
+  ipc-channel: "aeron:ipc"
+  md-multicast: "aeron:udp?endpoint=239.1.1.1:40001"
+  egress-channel: "aeron:udp?endpoint=239.1.1.2:40002"
+  cluster-ingress: "aeron:udp?endpoint=localhost:9010"
+  archive-dir: "/var/aeron/archive"
+ 
+token-bucket:            # Design 2 only
+  default-bucket-usd: 500000_00     # $500,000 in cents
+  topup-threshold-pct: 0.10         # request top-up when 10% remaining
+ 
+cluster:                 # Design 3 only
+  node-id: 0
+  members: "0,localhost:9010,localhost:9020|1,node2:9010,node2:9020|2,node3:9010,node3:9020"
+  snapshot-interval-events: 10000
+2.4 Reference Data
+Schema SQL
+-- credit_account (loaded at SOD into each design's in-memory store)
+CREATE TABLE credit_account (
+    account_id       VARCHAR(36) PRIMARY KEY,
+    client_name      VARCHAR(128) NOT NULL,
+    master_limit_usd BIGINT NOT NULL,        -- in cents
+    reserved_buffer  BIGINT NOT NULL DEFAULT 0,
+    active           BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ NOT NULL,
+    updated_at       TIMESTAMPTZ NOT NULL
+);
+ 
+-- trade_log (append-only, source of truth for SOD replay)
+CREATE TABLE trade_log (
+    trade_id         VARCHAR(36) PRIMARY KEY,
+    order_id         VARCHAR(36) NOT NULL,
+    account_id       VARCHAR(36) NOT NULL REFERENCES credit_account,
+    client_id        VARCHAR(64) NOT NULL,
+    currency_pair    VARCHAR(8)  NOT NULL,
+    product_type     VARCHAR(10) NOT NULL,
+    notional_usd     BIGINT NOT NULL,
+    fx_rate_used     NUMERIC(18,8) NOT NULL,
+    decision_code    VARCHAR(32) NOT NULL,
+    decided_at       TIMESTAMPTZ NOT NULL
+);
+ 
+-- Indexes for SOD replay performance
+CREATE INDEX idx_trade_log_account_date
+    ON trade_log(account_id, decided_at DESC);
+DESIGN 1 — Optimistic Local Cache + Async Correction
+3. Design 1 — Optimistic Local Cache + Async Correction
+3.1 Concept
+Each trading client holds a read-only cached copy of the current credit consumed, broadcast by the Credit Manager at a configurable interval. All credit checks are pure local arithmetic against this cached value. After accepting an order, the client fires an async trade event to the manager; the manager updates the master state and rebroadcasts.
+Key insight: the broadcast interval determines your maximum overshoot window. On Aeron multicast at LAN speeds, this can be as tight as 100–500 µs, bounding the overshoot to a small number of concurrent in-flight orders.
+3.2 Component Diagram
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                    CREDIT MANAGER (JVM A)                        │
+  │  masterConsumed: Map<accountId, Long>                           │
+  │  masterLimit:    Map<accountId, Long>                           │
+  │                                                                  │
+  │  ① Receives TradeExecutedEvent (async, fire-and-forget)         │
+  │  ② Updates masterConsumed                                        │
+  │  ③ Detects breach → publishes HardStopEvent                     │
+  │  ④ Broadcasts CreditSnapshot every N µs via Aeron multicast     │
+  └──────────────────┬───────────────────────────────────────────────┘
+                     │ Aeron multicast  (aeron:udp?endpoint=239.x.x.x)
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+  │  Client A   │ │  Client B   │ │  Client C   │   (separate JVMs)
+  │             │ │             │ │             │
+  │ localCache  │ │ localCache  │ │ localCache  │
+  │ consumed=X  │ │ consumed=X  │ │ consumed=X  │  ← may be stale
+  │             │ │             │ │             │
+  │ check local │ │ check local │ │ check local │  ← no network
+  │ fire-forget │ │ fire-forget │ │ fire-forget │  ← trade event
+  └─────────────┘ └─────────────┘ └─────────────┘
+          │                │               │
+          └────────────────┴───────────────┘
+                 Aeron IPC / UDP Unicast → Credit Manager
+3.3 Sequence Diagram
+  Client A              Credit Manager         Client B
+     │                       │                    │
+     │  ◄── CreditSnapshot ──┤                    │
+     │      consumed=$7.2M   │◄── CreditSnapshot ─┤
+     │                       │                    │
+  [Order arrives $500K]       │             [Order arrives $500K]
+     │                       │                    │
+  [local check: 7.2M+0.5M=7.7M < 8M → ACCEPT]    │
+     │                       │         [local check: 7.2M+0.5M=7.7M < 8M → ACCEPT]
+     │                       │                    │
+  ───TradeEvent($500K)──────►│                    │
+     │                       │◄───TradeEvent($500K)
+     │                   [update: consumed=8.2M]  │
+     │                   [8.2M > 8M → BREACH!]    │
+     │                   [publish HardStopEvent]  │
+     │◄──── HardStop ────────┤────── HardStop ────►│
+     │  [flip local flag]    │       [flip flag]  │
+     │  [reject all new]     │       [reject all] │
+ 
+  NOTE: Both orders were accepted. Overshoot = $200K.
+  Breach window = time between last broadcast and HardStop receipt.
+3.4 Trade-off Analysis
+Dimension
+Rating
+Detail
+Latency
+⭐⭐⭐⭐⭐  Sub-µs
+Pure in-process arithmetic, no I/O whatsoever on hot path
+Throughput
+⭐⭐⭐⭐⭐  Unlimited
+Each client is fully independent, no coordination
+Consistency
+⭐⭐  Eventual
+Cross-client overshoot guaranteed; bounded by broadcast cadence
+Correctness
+⭐⭐  Soft
+Overshoot detected post-fact; HardStop closes the breach window
+Simplicity
+⭐⭐⭐⭐  High
+No shard logic; Credit Manager is simple aggregator + broadcaster
+Recovery
+⭐⭐⭐  Medium
+Manager replays trade_log at SOD; clients receive first broadcast
+3.5 Step-by-Step Build Instructions
+Step 1 — Project Structure
+Project Layout
+credit-cache-design/
+├── credit-manager/           # Gradle sub-project (JVM A)
+│   ├── src/main/java/fx/credit/manager/
+│   │   ├── CreditManager.java
+│   │   ├── SnapshotBroadcaster.java
+│   │   └── SodLoader.java
+│   └── build.gradle
+├── credit-client/            # Gradle sub-project (embedded in trading client JVM)
+│   ├── src/main/java/fx/credit/client/
+│   │   ├── LocalCreditCache.java
+│   │   ├── CacheUpdateSubscriber.java
+│   │   └── TradeEventPublisher.java
+│   └── build.gradle
+├── domain/                   # shared domain objects
+│   └── src/main/java/fx/credit/domain/
+│       ├── Order.java
+│       ├── CreditAccount.java
+│       ├── CreditDecision.java
+│       └── events/
+└── settings.gradle
+Step 2 — Gradle Dependencies
+build.gradle
+// build.gradle (all subprojects)
+dependencies {
+    implementation "io.aeron:aeron-all:1.44.1"
+    implementation "org.agrona:agrona:1.21.2"
+    implementation "org.slf4j:slf4j-api:2.0.9"
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.1"
+}
+Step 3 — LocalCreditCache (trading client side)
+LocalCreditCache.java
+package fx.credit.client;
+ 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+ 
+public class LocalCreditCache {
+ 
+    // Written by Aeron subscriber thread, read by order check thread
+    private final ConcurrentHashMap<String, Long> consumed = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> limits   = new ConcurrentHashMap<>();
+    // HardStop flag per account — volatile for cross-thread visibility
+    private final ConcurrentHashMap<String, AtomicBoolean> hardStop = new ConcurrentHashMap<>();
+    private final TradeEventPublisher publisher;
+ 
+    public LocalCreditCache(TradeEventPublisher publisher) {
+        this.publisher = publisher;
+    }
+ 
+    /**
+     * Hot path — called on every incoming order.
+     * Must complete in < 1 µs. No I/O, no locks.
+     */
+    public CreditDecision checkAndAccept(Order order) {
+        String aid = order.accountId();
+ 
+        // 1. Hard stop check first (volatile read)
+        AtomicBoolean stop = hardStop.get(aid);
+        if (stop != null && stop.get()) {
+            return CreditDecision.reject(order, DecisionCode.REJECT_HARD_STOP, "Account frozen");
+        }
+ 
+        // 2. Snapshot check (may be stale — that is by design)
+        long knownConsumed = consumed.getOrDefault(aid, 0L);
+        long limit         = limits.getOrDefault(aid, Long.MAX_VALUE);
+ 
+        if (knownConsumed + order.notionalUSD() > limit) {
+            return CreditDecision.reject(order, DecisionCode.REJECT_LIMIT_EXCEEDED,
+                "Cached consumed=" + knownConsumed + " + notional=" + order.notionalUSD() + " > limit=" + limit);
+        }
+ 
+        // 3. Optimistic accept — publish trade event async, no wait
+        publisher.publishAsync(new TradeExecutedEvent(order));
+        return CreditDecision.accept(order, knownConsumed + order.notionalUSD(), limit - knownConsumed - order.notionalUSD());
+    }
+ 
+    // Called by CacheUpdateSubscriber on Aeron multicast thread
+    public void onSnapshot(String accountId, long newConsumed, long newLimit) {
+        consumed.put(accountId, newConsumed);
+        limits.put(accountId, newLimit);
+    }
+ 
+    public void onHardStop(String accountId) {
+        hardStop.computeIfAbsent(accountId, k -> new AtomicBoolean()).set(true);
+    }
+}
+Step 4 — SnapshotBroadcaster (Credit Manager side)
+SnapshotBroadcaster.java
+package fx.credit.manager;
+ 
+import io.aeron.Aeron;
+import io.aeron.Publication;
+import org.agrona.concurrent.UnsafeBuffer;
+import java.nio.ByteBuffer;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+ 
+public class SnapshotBroadcaster {
+ 
+    private static final int STREAM_ID = 1001;
+    private final Publication pub;
+    private final UnsafeBuffer buf = new UnsafeBuffer(ByteBuffer.allocateDirect(4096));
+    private final Map<String, Long> consumed;
+    private final Map<String, Long> limits;
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+ 
+    public SnapshotBroadcaster(Aeron aeron, String channel,
+                               Map<String, Long> consumed, Map<String, Long> limits) {
+        this.pub      = aeron.addPublication(channel, STREAM_ID);
+        this.consumed = consumed;
+        this.limits   = limits;
+    }
+ 
+    /** Schedule broadcast every broadcastIntervalMicros microseconds */
+    public void start(long broadcastIntervalMicros) {
+        scheduler.scheduleAtFixedRate(this::broadcastAll,
+            0, broadcastIntervalMicros, TimeUnit.MICROSECONDS);
+    }
+ 
+    private void broadcastAll() {
+        consumed.forEach((accountId, cons) -> {
+            long limit = limits.getOrDefault(accountId, 0L);
+            // Simple encoding: [accountIdLen][accountId][consumed][limit]
+            int offset = 0;
+            byte[] idBytes = accountId.getBytes();
+            buf.putInt(offset, idBytes.length);           offset += 4;
+            buf.putBytes(offset, idBytes);                offset += idBytes.length;
+            buf.putLong(offset, cons);                    offset += 8;
+            buf.putLong(offset, limit);                   offset += 8;
+            pub.offer(buf, 0, offset); // best-effort — loss is tolerable
+        });
+    }
+}
+Step 5 — SOD Loader
+SodLoader.java
+package fx.credit.manager;
+ 
+import java.sql.*;
+import java.util.Map;
+ 
+public class SodLoader {
+ 
+    /**
+     * At Start-of-Day, replay today's trade_log per account
+     * and populate the Credit Manager's master consumed map.
+     */
+    public static void load(Connection db,
+                            Map<String, Long> consumed,
+                            Map<String, Long> limits) throws SQLException {
+        // Load limits from reference data
+        try (PreparedStatement ps = db.prepareStatement(
+                "SELECT account_id, master_limit_usd FROM credit_account WHERE active = TRUE")) {
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                limits.put(rs.getString("account_id"), rs.getLong("master_limit_usd"));
+            }
+        }
+ 
+        // Aggregate today's accepted trades
+        try (PreparedStatement ps = db.prepareStatement(
+                "SELECT account_id, COALESCE(SUM(notional_usd), 0) AS total " +
+                "FROM trade_log " +
+                "WHERE decided_at >= CURRENT_DATE AND decision_code = 'ACCEPT' " +
+                "GROUP BY account_id")) {
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                consumed.put(rs.getString("account_id"), rs.getLong("total"));
+            }
+        }
+    }
+}
+DESIGN 2 — Token Bucket with Centralised Top-Up
+4. Design 2 — Token Bucket with Centralised Top-Up
+4.1 Concept
+The Credit Manager pre-grants each trading client a "bucket" — a finite quota of notional they may consume without any network call. The client deducts from its local bucket atomically. When the bucket drops below a configurable threshold, the client requests a top-up from the manager. Only the top-up path involves a network call; the hot path is entirely in-process.
+Key insight: top-up requests are rare relative to order flow. A bucket sized at $500K consumed by $50K average orders yields 10 orders per bucket — top-up overhead is 10% of orders at most. In practice, buckets refill faster than they drain.
+4.2 Component Diagram
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                CREDIT MANAGER (JVM A)                            │
+  │                                                                  │
+  │  masterConsumed: Map<accountId, Long>                           │
+  │  allocatedBuckets: Map<clientId, Long>  (total granted out)     │
+  │                                                                  │
+  │  Handles: TopUpRequest → grants bucket or partial → TopUpGrant  │
+  │  Invariant: sum(allocatedBuckets[acct]) ≤ masterLimit[acct]*0.8 │
+  └──────────────────┬───────────────────────────────────────────────┘
+                     │ Aeron IPC (request/reply — slow path only)
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+  │  Client A   │ │  Client B   │ │  Client C   │
+  │             │ │             │ │             │
+  │ bucket:     │ │ bucket:     │ │ bucket:     │
+  │ AtomicLong  │ │ AtomicLong  │ │ AtomicLong  │
+  │ $500K       │ │ $500K       │ │ $500K       │
+  │             │ │             │ │             │
+  │ CAS deduct  │ │ CAS deduct  │ │ CAS deduct  │ ← hot path
+  │ TopUp if    │ │ TopUp if    │ │ TopUp if    │ ← slow path
+  │ < 10%       │ │ < 10%       │ │ < 10%       │   (rare)
+  └─────────────┘ └─────────────┘ └─────────────┘
+4.3 Sequence Diagram
+  Client A              Credit Manager
+     │                       │
+  [SOD startup]              │
+  ──TopUpRequest($500K)─────►│
+     │              [check: sum(buckets)+500K ≤ limit*0.8 → OK]
+     │              [allocatedBuckets[A] = 500K]
+  ◄──TopUpGrant($500K)───────│
+  [bucket.set(500_000_00)]   │
+     │                       │
+  [Order: $50K notional]     │
+  [bucket CAS: 500K→450K]    │   ← ~100ns
+  [ACCEPT instantly]         │
+  ──TradeEvent($50K)────────►│   ← async, no wait
+     │              [masterConsumed[A] += 50K]
+     │                       │
+  ... 8 more orders ...       │
+     │                       │
+  [bucket = $50K = 10%]      │
+  ──TopUpRequest($450K)─────►│   ← slow path triggered
+  [continue trading on       │
+   remaining $50K while       │
+   waiting for top-up]       │
+  ◄──TopUpGrant($400K)───────│   ← manager grants partial (limit headroom)
+  [bucket += 400K = $450K]   │
+4.4 Trade-off Analysis
+Dimension
+Rating
+Detail
+Latency (hot)
+⭐⭐⭐⭐⭐  ~100ns
+CAS on AtomicLong — single CPU instruction, no cache miss
+Latency (top-up)
+⭐⭐⭐  ~10–30µs
+Aeron IPC round-trip, triggered only when bucket depletes
+Throughput
+⭐⭐⭐⭐  Very high
+Linear with client count; only top-up serialises
+Consistency
+⭐⭐⭐  Bounded slack
+Sum of buckets caps overshoot; 20% buffer absorbs burst
+Correctness
+⭐⭐⭐  Good
+Harder to overshoot than Design 1; manager controls grants
+Simplicity
+⭐⭐⭐⭐  Good
+Simpler than Design 3; more complex than Design 1
+Recovery
+⭐⭐⭐  Medium
+Buckets lost on crash; clients request top-up on reconnect
+4.5 Step-by-Step Build Instructions
+Step 1 — TokenBucketShard (client side)
+TokenBucketShard.java
+package fx.credit.client;
+ 
+import java.util.concurrent.atomic.AtomicLong;
+ 
+public class TokenBucketShard {
+ 
+    private final AtomicLong bucketCents;  // remaining credit in USD cents
+    private final String     accountId;
+    private final String     clientId;
+    private final long       topUpThresholdCents;
+    private final TopUpRequester topUpRequester;
+ 
+    // Prevent concurrent top-up storms
+    private volatile boolean topUpInFlight = false;
+ 
+    public TokenBucketShard(String accountId, String clientId,
+                            long initialBucketCents, long topUpThresholdCents,
+                            TopUpRequester topUpRequester) {
+        this.bucketCents         = new AtomicLong(initialBucketCents);
+        this.accountId           = accountId;
+        this.clientId            = clientId;
+        this.topUpThresholdCents = topUpThresholdCents;
+        this.topUpRequester      = topUpRequester;
+    }
+ 
+    /**
+     * Hot path. Single CAS loop, no I/O.
+     */
+    public CreditDecision checkAndDeduct(Order order) {
+        long notional = order.notionalUSD();
+ 
+        while (true) {
+            long current = bucketCents.get();
+            if (current < notional) {
+                // Bucket exhausted — trigger top-up (async) and reject or queue
+                triggerTopUpIfNotInFlight();
+                return CreditDecision.reject(order, DecisionCode.REJECT_SHARD_EXHAUSTED,
+                    "Bucket exhausted. Top-up in flight: " + topUpInFlight);
+            }
+            if (bucketCents.compareAndSet(current, current - notional)) {
+                // Successful deduction
+                maybeRequestTopUp(current - notional);
+                return CreditDecision.accept(order, -1, current - notional);
+            }
+            // CAS lost to concurrent thread on same client — retry
+        }
+    }
+ 
+    /** Called async when top-up grant arrives from Credit Manager */
+    public void onTopUpGrant(long grantedCents) {
+        bucketCents.addAndGet(grantedCents);
+        topUpInFlight = false;
+    }
+ 
+    private void maybeRequestTopUp(long remaining) {
+        if (remaining < topUpThresholdCents && !topUpInFlight) {
+            triggerTopUpIfNotInFlight();
+        }
+    }
+ 
+    private void triggerTopUpIfNotInFlight() {
+        // Optimistic CAS on boolean to avoid duplicate requests
+        if (!topUpInFlight) {
+            topUpInFlight = true;
+            topUpRequester.requestAsync(new TopUpRequest(accountId, clientId,
+                /* requestedCents */ 500_000_00L));
+        }
+    }
+}
+Step 2 — CreditManager (top-up handler)
+CreditManager.java — Design 2
+package fx.credit.manager;
+ 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+ 
+public class CreditManager {
+ 
+    private final Map<String, Long> masterLimit    = new ConcurrentHashMap<>();
+    private final Map<String, Long> masterConsumed = new ConcurrentHashMap<>();
+    // Total bucket credit currently outstanding to all clients per account
+    private final Map<String, Long> totalAllocated = new ConcurrentHashMap<>();
+ 
+    private static final double ALLOCATION_CAP = 0.80; // never grant more than 80% of limit
+ 
+    /**
+     * Called when a TopUpRequest arrives from a client.
+     * Returns the actual grant — may be less than requested if headroom is tight.
+     */
+    public TopUpGrant handleTopUpRequest(TopUpRequest req) {
+        String aid = req.accountId();
+        long   limit     = masterLimit.getOrDefault(aid, 0L);
+        long   consumed  = masterConsumed.getOrDefault(aid, 0L);
+        long   allocated = totalAllocated.getOrDefault(aid, 0L);
+ 
+        long cap       = (long)(limit * ALLOCATION_CAP);
+        long headroom  = cap - consumed - allocated;
+        long grant     = Math.max(0, Math.min(req.requestedCents(), headroom));
+ 
+        if (grant > 0) {
+            totalAllocated.merge(aid, grant, Long::sum);
+        }
+ 
+        return new TopUpGrant(req.accountId(), req.clientId(), grant);
+    }
+ 
+    /** Called when async TradeExecutedEvent arrives */
+    public void onTradeExecuted(TradeExecutedEvent evt) {
+        masterConsumed.merge(evt.accountId(), evt.notionalUSD(), Long::sum);
+        checkBreach(evt.accountId());
+    }
+ 
+    private void checkBreach(String accountId) {
+        long consumed = masterConsumed.getOrDefault(accountId, 0L);
+        long limit    = masterLimit.getOrDefault(accountId, Long.MAX_VALUE);
+        if (consumed > limit) {
+            publishHardStop(accountId, consumed - limit);
+        }
+    }
+ 
+    private void publishHardStop(String accountId, long overshoot) {
+        // Publish HardStopEvent via Aeron to all clients
+        System.err.println("BREACH: account=" + accountId + " overshoot=" + overshoot);
+    }
+}
+DESIGN 3 — Atomic Broadcast / Total Order via Aeron Cluster
+5. Design 3 — Atomic Broadcast / Total Order via Aeron Cluster
+5.1 Concept
+Rather than distributing state, this design distributes the decision itself. All orders are funnelled through an Aeron Cluster sequencer that stamps each with a monotonic sequence number and replicates it to all cluster nodes via Raft. Every node runs identical deterministic credit check logic against the same ordered stream. Because all nodes process the same events in the same order, they maintain identical state — there is no need for cross-node coordination.
+Key insight: consistency is achieved not by centralising the check, but by guaranteeing that every node sees every event in exactly the same order. The sequencer stamps and replicates; it does not check. Checking happens locally on each node.
+5.2 What the Sequencer Does vs What It Does Not Do
+The sequencer DOES
+The sequencer does NOT
+Assigns monotonic sequence numbers
+Perform any credit check
+Replicates event to all Raft followers
+Access any database or external service
+Commits only after quorum acknowledgement
+Aggregate or compare state across orders
+Elects a new leader on node failure
+Know the current credit consumed amount
+Provides ordered egress stream to all subscribers
+Have any business logic whatsoever
+5.3 Architecture Diagram
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │              AERON CLUSTER  (3-node Raft, each a separate JVM)      │
+  │                                                                     │
+  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │
+  │  │  Node 1 (Leader) │  │  Node 2 (Follow) │  │  Node 3 (Follow) │  │
+  │  │                  │  │                  │  │                  │  │
+  │  │ CreditCheckSvc   │  │ CreditCheckSvc   │  │ CreditCheckSvc   │  │
+  │  │ ExecutionEngine  │◄─┼─── Raft log  ───►│  │ ExecutionEngine  │  │
+  │  │ LastLook         │  │ LastLook         │  │ LastLook         │  │
+  │  │                  │  │                  │  │                  │  │
+  │  │ identical state  │  │ identical state  │  │ identical state  │  │
+  │  └──────────────────┘  └──────────────────┘  └──────────────────┘  │
+  └─────────────────────────────────────────────────────────────────────┘
+       ▲  Aeron Cluster Ingress            │ Aeron Cluster Egress
+       │  (orders stamped + replicated)    │ (Fill/Reject decisions)
+  ┌────┴────────────────┐         ┌────────▼──────────────────────────┐
+  │   Order Gateway     │         │  Subscribers (separate JVMs)      │
+  │   (FIX/REST→internal│         │  • Trade Capture                  │
+  │    schema)          │         │  • OMS / Order Management         │
+  └────────────────┬────┘         │  • Risk/Breach Monitor            │
+       ▲           │              │  • Trading Clients (own fills)     │
+  Trading Clients  │              └───────────────────────────────────┘
+  (submit orders)  │
+                   └── Aeron IPC ~5-15µs
+5.4 Sequence Diagram — Credit Check Inside Cluster
+  Client A     Order Gateway    Cluster Ingress    ClusteredService     Egress
+     │               │               │                   │               │
+  [Order $500K]      │               │                   │               │
+  ──FIX msg─────────►│               │                   │               │
+     │          [validate syntax]    │                   │               │
+     │          ──offer(order)──────►│                   │               │
+     │               │          [seq=N, Raft commit]     │               │
+     │               │          ──onSessionMessage()────►│               │
+     │               │               │         [consumed[A] + 500K ≤ limit?]
+     │               │               │         [YES → consumed[A] += 500K]
+     │               │               │         [DecisionCode = ACCEPT]   │
+     │               │               │         ──egress(Fill, seq=N)────►│
+     │               │               │                   │     [multicast │
+     │               │               │                   │      to all    │
+  ◄──Fill(orderId)───────────────────────────────────────────────────────┘
+     │  (~10-30µs total: 1 Aeron IPC hop + 1 egress hop)
+ 
+  IMPORTANT: All 3 cluster nodes process seq=N and update consumed[A].
+  If Client B simultaneously submits $500K (seq=N+1):
+  → All nodes already have consumed[A] updated from seq=N
+  → Check is against the already-updated value → correct decision guaranteed.
+5.5 Trade-off Analysis
+Dimension
+Rating
+Detail
+Latency
+⭐⭐⭐⭐  ~10–30µs
+One sequencer hop + one egress hop; no compounding on burst
+Throughput
+⭐⭐⭐⭐  High
+Sequencer is the only bottleneck; runs at ~1–2M msgs/sec on modern hardware
+Consistency
+⭐⭐⭐⭐⭐  Exact
+Hard guarantee: no overshoot possible by construction
+Correctness
+⭐⭐⭐⭐⭐  Perfect
+All nodes converge to identical state after each event
+Simplicity
+⭐⭐⭐  Medium
+Determinism constraint is strict; no I/O inside ClusteredService
+Fault tolerance
+⭐⭐⭐⭐⭐  Excellent
+Raft gives automatic failover; state fully recoverable
+Recovery
+⭐⭐⭐⭐  Good
+Aeron Archive snapshot + log replay; no external DB on hot path
+5.6 Critical Constraint: Determinism
+The ClusteredService.onSessionMessage() callback MUST be deterministic. If any node produces a different result for the same input — due to wall-clock reads, non-deterministic data structures, or external I/O — nodes will diverge and the cluster will become inconsistent. This is the single most important implementation rule for Design 3.
+Allowed inside ClusteredService
+FORBIDDEN inside ClusteredService
+HashMap / ArrayList (deterministic iteration)
+System.currentTimeMillis() or Instant.now()
+Cluster-provided timestamp (from onSessionMessage)
+Random / UUID.randomUUID()
+Pure arithmetic and comparisons
+Database reads or writes
+Publishing to egress
+REST or gRPC calls
+Reading from internal maps built from prior events
+Non-deterministic comparators (HashMap iteration order on JDK <8)
+Snapshot / restore logic
+Logging frameworks that may buffer differently per node
+5.7 Step-by-Step Build Instructions
+Step 1 — Project Structure
+Project Layout
+credit-cluster-design/
+├── cluster-node/              # The Aeron Cluster node (runs 3 instances)
+│   ├── src/main/java/fx/credit/cluster/
+│   │   ├── CreditClusteredService.java    # ClusteredService impl
+│   │   ├── CreditState.java               # in-memory state machine
+│   │   ├── ClusterNodeMain.java           # startup / Raft config
+│   │   └── SodSnapshotLoader.java
+│   └── build.gradle
+├── order-gateway/             # FIX/REST → Aeron Ingress
+│   └── src/main/java/fx/credit/gateway/
+│       ├── OrderGateway.java
+│       └── AeronIngressPublisher.java
+├── subscribers/               # External egress consumers
+│   └── src/main/java/fx/credit/downstream/
+│       ├── TradeCapture.java
+│       ├── OmsSubscriber.java
+│       └── RiskMonitor.java
+├── domain/
+└── settings.gradle
+Step 2 — Gradle Dependencies
+build.gradle
+// build.gradle
+dependencies {
+    implementation "io.aeron:aeron-all:1.44.1"
+    implementation "org.agrona:agrona:1.21.2"
+    // Cluster uses Aeron Archive internally — no separate dependency needed
+}
+Step 3 — CreditState (the in-memory state machine)
+CreditState.java
+package fx.credit.cluster;
+ 
+import java.util.HashMap;
+import java.util.Map;
+ 
+/**
+ * Pure in-memory state — no I/O, fully deterministic.
+ * Identical instance on all 3 cluster nodes.
+ */
+public class CreditState {
+ 
+    // Use LinkedHashMap where iteration order matters for snapshotting
+    private final Map<String, Long> masterLimit    = new HashMap<>();
+    private final Map<String, Long> consumed       = new HashMap<>();
+    private final Map<String, Boolean> hardStop    = new HashMap<>();
+ 
+    public CreditDecisionCode applyOrder(String accountId, long notionalUSD) {
+        if (Boolean.TRUE.equals(hardStop.get(accountId))) {
+            return CreditDecisionCode.REJECT_HARD_STOP;
+        }
+        long limit = masterLimit.getOrDefault(accountId, 0L);
+        long cons  = consumed.getOrDefault(accountId, 0L);
+ 
+        if (cons + notionalUSD > limit) {
+            return CreditDecisionCode.REJECT_LIMIT_EXCEEDED;
+        }
+        // Mutate state — identical on all nodes
+        consumed.put(accountId, cons + notionalUSD);
+        return CreditDecisionCode.ACCEPT;
+    }
+ 
+    public void applyMarginUpdate(String accountId, long newLimitUSD) {
+        // Margin updates arrive as sequenced commands through ingress
+        masterLimit.put(accountId, newLimitUSD);
+    }
+ 
+    public void applyHardStop(String accountId) {
+        hardStop.put(accountId, Boolean.TRUE);
+    }
+ 
+    // SOD load — called before cluster opens for ingress
+    public void loadAccount(String accountId, long limitUSD, long sodConsumedUSD) {
+        masterLimit.put(accountId, limitUSD);
+        consumed.put(accountId, sodConsumedUSD);
+    }
+ 
+    // Snapshot serialisation (used by Aeron Archive)
+    public byte[] toSnapshot() {
+        // Encode masterLimit + consumed + hardStop into bytes
+        // Implementation: use Agrona DirectBuffer for zero-copy encoding
+        throw new UnsupportedOperationException("Implement with Agrona encoding");
+    }
+ 
+    public static CreditState fromSnapshot(byte[] bytes) {
+        throw new UnsupportedOperationException("Implement with Agrona decoding");
+    }
+}
+Step 4 — CreditClusteredService
+CreditClusteredService.java
+package fx.credit.cluster;
+ 
+import io.aeron.cluster.codecs.CloseReason;
+import io.aeron.cluster.service.ClientSession;
+import io.aeron.cluster.service.Cluster;
+import io.aeron.cluster.service.ClusteredService;
+import io.aeron.logbuffer.Header;
+import org.agrona.DirectBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
+import java.nio.ByteBuffer;
+ 
+public class CreditClusteredService implements ClusteredService {
+ 
+    private final CreditState    state = new CreditState();
+    private final MessageEncoder encoder = new MessageEncoder();
+    private Cluster              cluster;
+    private final UnsafeBuffer   egressBuf =
+        new UnsafeBuffer(ByteBuffer.allocateDirect(256));
+ 
+    @Override
+    public void onStart(Cluster cluster, Image snapshotImage) {
+        this.cluster = cluster;
+        if (snapshotImage != null) {
+            // Restore state from Aeron Archive snapshot
+            restoreFromSnapshot(snapshotImage);
+        } else {
+            // SOD: load from trade_log via SodSnapshotLoader
+            SodSnapshotLoader.load(state);
+        }
+    }
+ 
+    /**
+     * Called by Aeron Cluster for every sequenced message — in strict order.
+     * MUST be deterministic. MUST NOT perform I/O.
+     * timestamp is cluster-provided — safe to use (same value on all nodes).
+     */
+    @Override
+    public void onSessionMessage(ClientSession session, long timestamp,
+                                 DirectBuffer buffer, int offset, int length,
+                                 Header header) {
+        // Decode message type
+        byte msgType = buffer.getByte(offset);
+ 
+        switch (msgType) {
+            case MessageType.ORDER_CHECK -> handleOrderCheck(session, buffer, offset + 1, timestamp);
+            case MessageType.MARGIN_UPDATE -> handleMarginUpdate(buffer, offset + 1);
+            case MessageType.HARD_STOP     -> handleHardStop(buffer, offset + 1);
+        }
+    }
+ 
+    private void handleOrderCheck(ClientSession session,
+                                  DirectBuffer buf, int offset, long timestamp) {
+        // Decode order fields
+        String accountId  = decodeString(buf, offset);  offset += accountId.length() + 4;
+        String orderId    = decodeString(buf, offset);  offset += orderId.length() + 4;
+        long   notional   = buf.getLong(offset);
+ 
+        // Run deterministic check against in-memory state
+        CreditDecisionCode code = state.applyOrder(accountId, notional);
+ 
+        // Encode decision into egress buffer
+        int len = encoder.encodeDecision(egressBuf, 0, orderId, accountId, code, timestamp);
+ 
+        // Publish to egress — multicast to all subscribers
+        cluster.idleStrategy().reset();
+        while (session.offer(egressBuf, 0, len) < 0) {
+            cluster.idleStrategy().idle();
+        }
+    }
+ 
+    private void handleMarginUpdate(DirectBuffer buf, int offset) {
+        String accountId  = decodeString(buf, offset); offset += accountId.length() + 4;
+        long   newLimit   = buf.getLong(offset);
+        // Update credit state deterministically
+        state.applyMarginUpdate(accountId, newLimit);
+    }
+ 
+    private void handleHardStop(DirectBuffer buf, int offset) {
+        String accountId = decodeString(buf, offset);
+        state.applyHardStop(accountId);
+    }
+ 
+    @Override
+    public void onTakeSnapshot(ExclusivePublication snapshotPublication) {
+        // Periodically called by Aeron Cluster to checkpoint state
+        byte[] snap = state.toSnapshot();
+        UnsafeBuffer snapBuf = new UnsafeBuffer(snap);
+        while (snapshotPublication.offer(snapBuf, 0, snap.length) < 0) {
+            Thread.onSpinWait();
+        }
+    }
+ 
+    @Override
+    public void onRoleChange(Cluster.Role newRole) {}
+    @Override
+    public void onTerminate(Cluster cluster) {}
+    @Override
+    public void onSessionOpen(ClientSession session, long timestamp) {}
+    @Override
+    public void onSessionClose(ClientSession session, long timestamp, CloseReason reason) {}
+ 
+    private void restoreFromSnapshot(Image image) {
+        // Read snapshot bytes from Aeron Image, delegate to CreditState.fromSnapshot()
+    }
+ 
+    private String decodeString(DirectBuffer buf, int offset) {
+        int len = buf.getInt(offset);
+        byte[] bytes = new byte[len];
+        buf.getBytes(offset + 4, bytes);
+        return new String(bytes);
+    }
+}
+Step 5 — ClusterNodeMain (startup and Raft config)
+ClusterNodeMain.java
+package fx.credit.cluster;
+ 
+import io.aeron.cluster.ClusteredMediaDriver;
+import io.aeron.cluster.ConsensusModule;
+import io.aeron.cluster.service.ClusteredServiceContainer;
+import io.aeron.driver.MediaDriver;
+import io.aeron.archive.Archive;
+ 
+public class ClusterNodeMain {
+ 
+    public static void main(String[] args) {
+        int nodeId = Integer.parseInt(System.getProperty("node.id", "0"));
+        String clusterMembers = System.getProperty("cluster.members",
+            "0,localhost:9010,localhost:9020|1,node2:9010,node2:9020|2,node3:9010,node3:9020");
+ 
+        MediaDriver.Context driverCtx = new MediaDriver.Context()
+            .aeronDirectoryName("/dev/shm/aeron-cluster-" + nodeId)
+            .threadingMode(ThreadingMode.DEDICATED);
+ 
+        Archive.Context archiveCtx = new Archive.Context()
+            .archiveDir(new File("/var/aeron/archive-" + nodeId))
+            .controlChannel("aeron:udp?endpoint=localhost:801" + nodeId)
+            .recordingEventsChannel("aeron:udp?endpoint=localhost:802" + nodeId);
+ 
+        ConsensusModule.Context consensusCtx = new ConsensusModule.Context()
+            .clusterMemberId(nodeId)
+            .clusterMembers(clusterMembers)
+            .ingressChannel("aeron:udp")
+            .logChannel("aeron:udp?endpoint=localhost:803" + nodeId)
+            .snapshotCounter(/* counter for snapshot interval */null);
+ 
+        ClusteredServiceContainer.Context serviceCtx = new ClusteredServiceContainer.Context()
+            .clusteredService(new CreditClusteredService());
+ 
+        try (ClusteredMediaDriver driver = ClusteredMediaDriver.launch(driverCtx, archiveCtx, consensusCtx);
+             ClusteredServiceContainer container = ClusteredServiceContainer.launch(serviceCtx)) {
+            System.out.println("Cluster node " + nodeId + " running");
+            Thread.currentThread().join(); // block until shutdown
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+Step 6 — Egress Subscriber (trading client receives decisions)
+CreditEgressSubscriber.java
+package fx.credit.gateway;
+ 
+import io.aeron.cluster.client.AeronCluster;
+import io.aeron.cluster.client.EgressListener;
+import org.agrona.DirectBuffer;
+ 
+public class CreditEgressSubscriber implements EgressListener {
+ 
+    private final OrderRouter orderRouter; // dispatches Fill/Reject to local handlers
+ 
+    public CreditEgressSubscriber(OrderRouter orderRouter) {
+        this.orderRouter = orderRouter;
+    }
+ 
+    @Override
+    public void onMessage(long clusterSessionId, long timestamp,
+                          DirectBuffer buffer, int offset, int length,
+                          Header header) {
+        // Decode decision
+        String orderId = decodeOrderId(buffer, offset);
+        CreditDecisionCode code = decodeCode(buffer, offset);
+ 
+        // Route to waiting order handler
+        orderRouter.onDecision(orderId, code);
+    }
+ 
+    /**
+     * AeronCluster client — connects to cluster ingress and subscribes to egress.
+     * Submit orders via cluster.offer(); receive decisions via this.onMessage().
+     */
+    public static AeronCluster connectToCluster() {
+        return AeronCluster.connect(new AeronCluster.Context()
+            .egressListener(new CreditEgressSubscriber(new OrderRouter()))
+            .ingressChannel("aeron:udp")
+            .ingressEndpoints("0=localhost:9010,1=node2:9010,2=node3:9010")
+            .egressChannel("aeron:udp?endpoint=localhost:9021"));
+    }
+ 
+    private String decodeOrderId(DirectBuffer buffer, int offset) {
+        int len = buffer.getInt(offset);
+        byte[] bytes = new byte[len];
+        buffer.getBytes(offset + 4, bytes);
+        return new String(bytes);
+    }
+ 
+    private CreditDecisionCode decodeCode(DirectBuffer buffer, int offset) {
+        // Skip orderId and accountId, read decision byte
+        return CreditDecisionCode.values()[buffer.getByte(offset)];
+    }
+}
+6. Comparative Summary
+6.1 Speed & Latency
+Scenario
+Design 1 (Cache)
+Design 2 (Bucket)
+Design 3 (Total Order)
+Single order hot path
+< 1 µs (local only)
+~100 ns (CAS)
+~10–30 µs (sequencer RTT)
+Burst of 10 orders (last order)
+< 1 µs (no compounding)
+< 1 µs (no compounding)
+~10–30 µs (no compounding)
+Burst with centralised model
+N/A
+N/A
+10 × RTT = 100–300 µs
+Top-up / refresh path
+Every broadcast interval
+~10–30 µs (Aeron IPC)
+N/A — state is in cluster
+Worst case (bucket dry / hard stop)
+HardStop latency (~µs)
+TopUp wait (~30 µs)
+Same as hot path
+6.2 Consistency & Correctness
+Property
+Design 1
+Design 2
+Design 3
+Cross-client overshoot possible?
+Yes — bounded by broadcast lag
+Yes — bounded by buffer %
+No — impossible by construction
+Overshoot bound
+N × notional per broadcast window
+(1 - 0.8) × limit = 20% of limit
+Zero
+Breach detection
+Async, after Credit Manager receives all events
+Same as Design 1
+Immediate — within same sequence
+Hard stop propagation
+Next multicast broadcast
+Next multicast broadcast
+Sequenced command — all nodes apply it in order
+SOD recovery
+Manager replays DB; clients receive first broadcast
+Manager replays DB; clients request buckets
+Aeron Archive snapshot + log replay; no DB on hot path
+6.3 Operational Complexity
+Concern
+Design 1
+Design 2
+Design 3
+Services to operate
+Credit Manager + N trading clients
+Same as Design 1
+3-node Aeron Cluster + Order Gateway + subscribers
+State loss on crash
+Manager loses broadcast state; clients stale
+Manager loses allocation state; clients lose buckets
+Aeron Archive persists all state; automatic recovery
+Determinism constraint
+None
+None
+Strict — no I/O, no wall clock inside ClusteredService
+Deployment complexity
+Low
+Low–Medium
+High — 3 cluster nodes, Aeron Archive, egress consumers
+When to choose
+Maximum speed, small overshoot acceptable
+Speed + bounded risk, simpler than Design 3
+Exactness required, willing to accept ~30 µs
+6.4 Decision Guide
+  Is a hard guarantee of no cross-client overshoot required?
+  │
+  ├── YES ──► Design 3 (Aeron Cluster / Total Order)
+  │           Consistent, fault-tolerant, ~10-30µs RTT
+  │
+  └── NO ──► Is the broadcast lag / bucket risk commercially acceptable?
+              │
+              ├── YES, and I want maximum simplicity
+              │   ──► Design 1 (Optimistic Cache)
+              │       Sub-µs hot path, simple ops, eventual consistency
+              │
+              └── YES, but I want a tighter risk bound than raw cache
+                  ──► Design 2 (Token Bucket)
+                      ~100ns hot path, bounded slack, top-up on demand
+7. Testing Strategy
+7.1 Unit Tests — CreditState (Design 3)
+CreditStateTest.java
+package fx.credit.cluster;
+ 
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+ 
+class CreditStateTest {
+ 
+    @Test
+    void acceptWhenBelowLimit() {
+        CreditState state = new CreditState();
+        state.loadAccount("ACC1", 10_000_000_00L, 0L); // $10M limit, $0 consumed
+ 
+        CreditDecisionCode code = state.applyOrder("ACC1", 500_000_00L); // $500K
+        assertEquals(CreditDecisionCode.ACCEPT, code);
+    }
+ 
+    @Test
+    void rejectWhenLimitExceeded() {
+        CreditState state = new CreditState();
+        state.loadAccount("ACC1", 10_000_000_00L, 9_800_000_00L); // $200K remaining
+ 
+        CreditDecisionCode code = state.applyOrder("ACC1", 500_000_00L); // $500K > $200K
+        assertEquals(CreditDecisionCode.REJECT_LIMIT_EXCEEDED, code);
+    }
+ 
+    @Test
+    void rejectAfterHardStop() {
+        CreditState state = new CreditState();
+        state.loadAccount("ACC1", 10_000_000_00L, 0L);
+        state.applyHardStop("ACC1");
+ 
+        CreditDecisionCode code = state.applyOrder("ACC1", 100_00L);
+        assertEquals(CreditDecisionCode.REJECT_HARD_STOP, code);
+    }
+ 
+    @Test
+    void consumedUpdatedOnAccept() {
+        CreditState state = new CreditState();
+        state.loadAccount("ACC1", 10_000_000_00L, 0L);
+ 
+        state.applyOrder("ACC1", 500_000_00L);
+        state.applyOrder("ACC1", 500_000_00L);
+ 
+        // Third order should see consumed = $1M
+        CreditDecisionCode code = state.applyOrder("ACC1", 9_100_000_00L); // $9.1M > remaining $9M
+        assertEquals(CreditDecisionCode.REJECT_LIMIT_EXCEEDED, code);
+    }
+}
+7.2 Unit Tests — TokenBucketShard (Design 2)
+TokenBucketShardTest.java
+class TokenBucketShardTest {
+ 
+    @Test
+    void concurrentDeductionsDoNotExceedBucket() throws InterruptedException {
+        long bucketSize = 1_000_000_00L; // $1M
+        long orderSize  =     50_000_00L; // $50K
+        int  threads    = 10;
+        int  ordersEach = 3;
+ 
+        TokenBucketShard shard = new TokenBucketShard(
+            "ACC1", "CLIENT1", bucketSize, 100_000_00L, req -> {});
+ 
+        AtomicInteger accepts = new AtomicInteger();
+        List<Thread> ts = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            ts.add(Thread.ofVirtual().start(() -> {
+                for (int j = 0; j < ordersEach; j++) {
+                    Order o = testOrder("ACC1", orderSize);
+                    if (shard.checkAndDeduct(o).code() == DecisionCode.ACCEPT)
+                        accepts.incrementAndGet();
+                }
+            }));
+        }
+        for (Thread t : ts) t.join();
+ 
+        // Total accepted notional must never exceed bucket size
+        assertTrue(accepts.get() * orderSize <= bucketSize,
+            "Accepted=" + accepts.get() + " × " + orderSize + " > bucketSize=" + bucketSize);
+    }
+}
+7.3 Integration Test Checklist
+Design 1: Verify that two simultaneous clients both receiving stale snapshot can produce a combined overshoot, and that the HardStop arrives within one broadcast interval of the Credit Manager receiving both events.
+Design 2: Verify that sum of all bucket allocations never exceeds limit × 0.80; verify top-up request is triggered when bucket drops below threshold; verify partial grant is handled gracefully.
+Design 3: Verify that submitting two orders simultaneously from different clients results in one ACCEPT and one REJECT when aggregate exceeds limit; verify state on all three cluster nodes is identical after each event; verify automatic leader failover and state recovery.
+8. Deployment & Operations
+8.1 System Requirements
+Component
+JVM
+CPU
+Memory
+Notes
+Credit Manager (D1/D2)
+JDK 21+
+2 cores dedicated
+4 GB
+Pin to isolated cores; disable GC pauses with ZGC
+Trading Client (D1/D2)
+JDK 21+
+1 core for credit check thread
+2 GB
+Credit check on dedicated thread; busy-spin idle strategy
+Cluster Node × 3 (D3)
+JDK 21+
+4 cores dedicated
+8 GB
+Separate physical hosts recommended; NVMe for Archive
+Order Gateway (D3)
+JDK 21+
+2 cores
+4 GB
+Stateless; can run multiple instances
+Aeron Media Driver
+shared
+1 dedicated core
+512 MB
+Use /dev/shm for IPC; set SO_RCVBUF/SO_SNDBUF
+8.2 JVM Startup Flags
+JVM Flags
+# Common to all designs — low-latency JVM settings
+JAVA_OPTS="
+  -server
+  -Xms4g -Xmx4g
+  -XX:+UseZGC
+  -XX:+UnlockExperimentalVMOptions
+  -XX:+ZUncommit
+  -XX:ZUncommitDelay=300
+  -XX:+AlwaysPreTouch
+  -XX:+UseTransparentHugePages
+  -Daeron.term.buffer.length=67108864
+  -Daeron.ipc.term.buffer.length=67108864
+  -Dagrona.disable.bounds.checks=true
+"
+ 
+# Design 3 cluster node additionally:
+  -Dnode.id=0
+  -Dcluster.members="0,node1:9010,node1:9020|1,node2:9010,node2:9020|2,node3:9010,node3:9020"
+8.3 SOD Checklist
+Start Aeron Media Driver on all hosts before any application JVM.
+Run SodLoader: connect to trade DB, aggregate today's ACCEPT trades per account, populate in-memory limit and consumed maps.
+For Design 3: start all three cluster nodes; wait for Raft leader election; confirm all nodes report LEADER or FOLLOWER status.
+For Design 1: start SnapshotBroadcaster; confirm at least one snapshot broadcast received by each trading client before opening for orders.
+For Design 2: trading clients send initial TopUpRequest per account; confirm TopUpGrant received and bucket set before opening for orders.
+Run smoke test: submit one order per active account; confirm ACCEPT decision received; check consumed state incremented correctly.
+Open trading sessions.
+For all three designs: never run trading clients without first confirming credit state has been loaded. An empty consumed map will accept all orders regardless of notional — the limit check will always pass against a zero baseline.
+9. Glossary
+Term
+Definition
+Aeron
+High-performance messaging library for low-latency IPC and UDP transport, developed by Real Logic
+Aeron Cluster
+Fault-tolerant replicated state machine built on top of Aeron and Raft consensus
+Aeron Archive
+Persistent recording of Aeron streams; used for Cluster snapshot and log replay
+Raft
+Consensus algorithm ensuring all cluster nodes agree on log order; Aeron Cluster uses a variant of Raft
+CAS
+Compare-And-Swap — single atomic CPU instruction used for lock-free state updates
+Credit Limit
+Maximum notional USD exposure a client is permitted at any point in time
+Egress
+The outbound stream from Aeron Cluster to external subscribers carrying decisions and events
+Ingress
+The inbound channel into Aeron Cluster through which client messages are sequenced
+SOD
+Start of Day — the process of loading previous trades and positions before opening for new orders
+Notional
+The face value of an FX order in USD equivalent, used as the unit of credit consumption
+Hard Stop
+An immediate freeze on all new orders for an account, triggered on confirmed credit breach
+Token Bucket
+A pre-allocated quota of credit assigned to a single trading client for autonomous consumption
+Total Order
+A global ordering of all events such that every observer processes them in exactly the same sequence
+ClusteredService
+The Aeron Cluster interface that a developer implements to define the replicated state machine logic
