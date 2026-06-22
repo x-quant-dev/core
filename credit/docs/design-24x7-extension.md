@@ -42,36 +42,39 @@ In the daily SOD model, the system restarts every morning, loads a clean positio
 
 ## 2. In-Flight Trade Reconciliation
 
-### The Hard Reset Race Condition
-If an external system pushes a new daily balance and the Credit Engine simply overwrites its local state, a race condition occurs:
-1. **T=23:59:58**: Credit Engine accepts Order A ($500K) and increments consumed exposure locally.
-2. **T=00:00:00**: Back-office generates the daily SOD balance snapshot (before Order A is settled or processed by back-office database).
-3. **T=00:00:01**: `AccountSnapshotCommand` is received by the Credit Engine with `consumed=0`.
-4. **T=00:00:02**: If overwritten blindly, Order A's $500K exposure is lost from the Credit Engine's tracking, creating an artificial limit overshoot capacity.
+### The Stale Database / Settlement Race Condition
+If an external system pushes a daily balance refresh and the Credit Engine simply overwrites its local state, a race condition occurs:
+1. **T=23:59:50**: Back-office database takes a snapshot of settled trades. Cumulative consumed exposure is **$7.0M**.
+2. **T=23:59:58**: Credit Engine accepts **Order A ($500K)** in real time, increasing in-memory consumed exposure to **$7.5M**.
+3. **T=00:00:02**: Credit Engine accepts **Order B ($300K)**, increasing in-memory consumed exposure to **$7.8M**.
+4. **T=00:00:05**: The `AccountSnapshotCommand` is received by the Credit Engine containing the database snapshot from T=23:59:50 (`authorityConsumedUsd = 7.0M`, `asOf = 23:59:50`).
+5. **If overwritten blindly (Hard Reset)**: The in-memory state resets to **$7.0M**, silently erasing the $800K exposure from Order A and Order B, resulting in a dangerous credit limit overshoot capacity.
 
 ### The Reconciled Floor Formula
-To resolve the race, the Credit Engine treats the back-office snapshot as a **floor** as of a specific point in time (`asOf`), adding back any trades accepted *after* that timestamp:
+To resolve this, the Credit Engine treats the back-office snapshot as a **floor** as of its database cut-off time (`asOf`), and adds back any in-flight trades accepted *after* that specific timestamp:
 
 $$\text{Reconciled Consumed} = \text{Authority Consumed (from snapshot)} + \sum \text{Trades Accepted } > \text{asOf}$$
 
 ```
 Back-Office             Command Stream            Credit Engine
      │                        │                         │
-     │                        │              [T=23:59:58 — Accepted Order $500K]
-     │                        │              [recentTrades: {$500K, T=23:59:58}]
+     │                        │              [T=23:59:58 — Accepted Order A $500K]
+     │                        │              [T=00:00:02 — Accepted Order B $300K]
+     │                        │              [recentTrades: {A:23:59:58, B:00:00:02}]
      │                        │                         │
-[T=00:00:00 — SOD snapshot]   │                         │
-[authorityConsumed = 7.2M]    │                         │
-[asOf = 23:59:59]             │                         │
+[T=23:59:50 — Snapshot Cutoff]│                         │
+[authorityConsumed = 7.0M]    │                         │
+[asOf = 23:59:50]             │                         │
      │                        │                         │
 ───── AccountSnapshot ───────►│                         │
       limit = 10M             │────────────────────────►│
-      consumed = 7.2M         │                         │ [Find trades after asOf]
-      asOf = 23:59:59         │                         │ [23:59:58 is NOT after 23:59:59]
-      seqNo = 42              │                         │ [inFlightAfterAsOf = $0]
-                              │                         │ [Reconciled = 7.2M + 0 = 7.2M]
-                              │                         │ [Prune trades <= 23:59:59]
-                              │                         │ [State: limit=10M, consumed=7.2M]
+      consumed = 7.0M         │                         │ [Find trades after asOf=23:59:50]
+      asOf = 23:59:50         │                         │   - Order A (23:59:58 > 23:59:50) -> YES
+      seqNo = 42              │                         │   - Order B (00:00:02 > 23:59:50) -> YES
+                              │                         │ [inFlightAfterAsOf = 500K + 300K = 800K]
+                              │                         │ [Reconciled = 7.0M + 800K = 7.8M]
+                              │                         │ [Prune trades <= 23:59:50]
+                              │                         │ [State: limit=10M, consumed=7.8M]
 ```
 
 ---
